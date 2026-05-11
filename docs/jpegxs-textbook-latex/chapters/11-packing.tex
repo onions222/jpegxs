@@ -1,0 +1,472 @@
+% 11-packing.tex — 打包、Marker 与码流语法
+% Source: chapters/11-packing-markers-and-codestream-syntax.md (expanded)
+
+\chapter{打包、Marker 与码流语法}\label{ch:packing}
+
+\section{本章目标}
+
+\begin{itemize}
+  \item 理解 JPEG XS 码流的整体语法结构
+  \item 掌握 precinct 数据的打包顺序：sigf $\to$ gcli $\to$ data $\to$ sign
+  \item 理解各 marker 段的字段含义
+  \item 掌握 bitpacker 的对齐和 padding 机制
+\end{itemize}
+
+\section{背景与标准语义}
+
+打包（packing）是编码管线的最后一步，负责将所有编码后的数据组装成 JPEG XS 码流。码流由 marker 段和数据段交替组成。
+
+\subsection{码流结构}
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[
+    box/.style={rectangle, draw, minimum height=0.7cm, minimum width=2.2cm, text centered, font=\ttfamily\small},
+    marker/.style={box, fill=blue!15},
+    opt/.style={box, fill=gray!15, dashed},
+    slice/.style={box, fill=green!10, minimum width=5cm},
+    node distance=0.3cm
+]
+    \node[marker] (soc) {SOC 0xFF10};
+    \node[opt, right=of soc] (cap) {[CAP]};
+    \node[marker, right=of cap] (pih) {PIH 0xFF12};
+    \node[marker, below=of soc] (cdt) {CDT 0xFF13};
+    \node[marker, right=of cdt] (wgt) {WGT 0xFF14};
+    \node[opt, right=of wgt] (nlt) {[NLT]};
+    \node[below=0.5cm of cdt.south west, anchor=north west] (slicetext) {\small\texttt{for each slice:}};
+    \node[slice, below=0.6cm of slicetext] (slh) {SLH 0xFF20};
+    \node[below=0.3cm of slh, font=\ttfamily\small, text width=5cm] (precbox) {%
+      \framebox[\linewidth]{Precinct Header}\\
+      \framebox[\linewidth]{Subpacket 0: sigf/gcli/data/sign}\\
+      \framebox[\linewidth]{Subpacket 1: \ldots}\\
+      \framebox[\linewidth]{[padding]}};
+    \node[marker, below=1.2cm of precbox] (eoc) {EOC 0xFF11};
+\end{tikzpicture}
+\caption{JPEG XS 码流结构}
+\label{fig:codestream-structure}
+\end{figure}
+
+\section{Marker 语法}
+
+\subsection{SOC (0xFF10)}
+
+固定 2 字节，标识码流开始。
+
+\subsection{PIH (0xFF12) --- Picture Header}
+
+\begin{table}[H]
+\centering
+\caption{PIH Marker 字段}
+\label{tab:pih-fields}
+\begin{tabular}{@{}lll@{}}
+\toprule
+字段 & 位数 & 含义 \\
+\midrule
+Lpih & 16 & PIH 长度（固定 26 bytes） \\
+Lcod & 32 & 码流总长度（bytes） \\
+Ppih & 16 & Profile \\
+Plev & 16 & Level（高 8 bit）+ Sublevel（低 8 bit） \\
+W & 16 & 图像宽度 \\
+H & 16 & 图像高度 \\
+Cw & 16 & 列宽 \\
+Hsl & 16 & slice 高度（以 $NL_y$ 为单位，需 $\times 2^{NL_y}$ 得实际行数） \\
+Nc & 8 & 分量数 \\
+Ng & 8 & GCLI 组大小 \\
+Ss & 8 & 显著性标志步长 \\
+Bw & 8 & 内部工作位宽 \\
+Fq & 4 & 小数位数 \\
+Br & 4 & 量化位深 \\
+Fslc & 1 & 强制 slice 标志 \\
+Ppoc & 3 & 渐进顺序 \\
+Cpih & 4 & 颜色变换类型 \\
+NLx & 4 & 水平分解层数 \\
+NLy & 4 & 垂直分解层数 \\
+Lh & 1 & 长 precinct header 标志 \\
+Rl & 1 & raw 模式选择 \\
+Qpih & 2 & 量化器类型 \\
+Fs & 2 & 符号处理策略 \\
+Rm & 2 & run 模式 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{CDT (0xFF13) --- Component Table}
+
+每个分量 2 字节：位深（8 bit）+ $s_x$（4 bit）+ $s_y$（4 bit）。
+
+\subsection{WGT (0xFF14) --- Weights Table}
+
+每 band 2 字节：gain（8 bit）+ priority（8 bit）。
+
+\subsection{SLH (0xFF20) --- Slice Header}
+
+\begin{table}[H]
+\centering
+\caption{SLH Marker 字段}
+\label{tab:slh-fields}
+\begin{tabular}{@{}lll@{}}
+\toprule
+字段 & 位数 & 含义 \\
+\midrule
+marker & 16 & 0xFF20 \\
+Lslh & 16 & 长度（固定 4） \\
+Ssli & 16 & slice 索引 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{其他可选 Marker}
+
+\begin{itemize}
+  \item \textbf{NLT (0xFF16)}：NLT 参数（Quadratic: 5 bytes, Extended: 12 bytes）
+  \item \textbf{CWD (0xFF17)}：DWT 抑制数 $S_d$（3 bytes）
+  \item \textbf{CTS (0xFF18)}：Tetrix 参数 $C_f, e_1, e_2$（4 bytes）
+  \item \textbf{CRG (0xFF19)}：Bayer CFA 配准（$4 \times 4 + 2 = 18$ bytes）
+  \item \textbf{CAP (0xFF50)}：能力标志（2--4 bytes）
+\end{itemize}
+
+\section{Precinct 打包}
+
+\subsection{Precinct Header}
+
+\begin{lstlisting}[numbers=none]
+Lprc        (PREC_HDR_PREC_SIZE bits)    ← precinct 数据总长度（bytes）
+Q           (PREC_HDR_QUANTIZATION_SIZE)  ← 量化参数
+R           (PREC_HDR_REFINEMENT_SIZE)    ← 细化参数
+per-band method signaling (3 bits/band)  ← GCLI 方法
+align to PREC_HDR_ALIGNMENT (8 bits)
+\end{lstlisting}
+
+\subsection{Subpacket 打包顺序}
+
+\begin{engineeringnote}
+sigf $\to$ gcli $\to$ data $\to$ sign 的打包顺序是代码中 \texttt{pack\_precinct()} 的实际执行顺序（代码直接事实）。标准文本定义了 subpacket 的段结构，但未规定段间排列的工程理由。``先传显著性标志以便解码端提前跳过零组''是对这一顺序的功能性解释。
+\end{engineeringnote}
+
+每个 subpacket 内的数据按以下顺序打包：
+
+\textbf{1. Packet Header}：
+\begin{lstlisting}[numbers=none]
+Dr          (1 bit)                      ← raw fallback 标志
+Ldata       (variable bits)              ← 数据段长度
+Lgcli       (variable bits)              ← GCLI 段长度
+Lsign       (variable bits)              ← 符号段长度
+align to PKT_HDR_ALIGNMENT (8 bits)
+\end{lstlisting}
+
+\textbf{2. Significance Flags}（如果 $D_r = 0$）：
+
+对每个 band 行，如果该 band 的 GCLI 方法使用显著性标志，写入 sig\_flags。对齐到 4 bit。
+
+\textbf{3. GCLI Data}：
+
+按 \texttt{pi[]} 顺序，对每个 band 行：
+\begin{itemize}
+  \item 如果 raw fallback：每个 GCLI 值直接写 4 bit
+  \item 否则：unary 编码预测残差
+\end{itemize}
+
+对齐到 4 bit。
+
+\textbf{4. Coefficient Data}：
+
+按 \texttt{pi[]} 顺序，对每个 band 行：
+\begin{itemize}
+  \item 对每个 GCLI 组（$\mathit{GCLI} > \mathit{GTLI}$）：
+    \begin{itemize}
+      \item 如果 $F_s = 0$（jointly）：先写所有系数的符号位（各 1 bit）
+      \item 然后从 MSB 到 GTLI，逐 bitplane 写入每组 4 个系数的 1 bit
+    \end{itemize}
+\end{itemize}
+
+对齐到 4 bit。
+
+\textbf{5. Sign Data}（如果 $F_s = 1$，separate signs）：
+
+独立的符号段。对每个系数，只有当 (1) 其所在组的 $\mathrm{GCLI} > \mathrm{GTLI}$，且 (2) 幅度右移 $\mathrm{GTLI}$ 位后仍非零时，才写入 1 bit 的符号位。如果量化后系数变为零，不需要符号位。对齐到 4 bit。
+
+\subsection{源码摘录：\texttt{pack\_precinct()}}
+
+\begin{lstlisting}[language=C,numbers=none]
+int pack_precinct(packing_context_t* ctx, bit_packer_t* bitstream,
+    precinct_t* precinct, rc_results_t* ra_result)
+{
+    const int position_count = line_count_of(precinct);
+    const bool use_long = precinct_use_long_headers(precinct);
+
+    // (1) 写 Precinct Header
+    bitpacker_write(bitstream,
+        ((ra_result->precinct_total_bits - ra_result->pbinfo.prec_header_size) >> 3),
+        PREC_HDR_PREC_SIZE);                                // Lprc (bytes)
+    bitpacker_write(bitstream, ra_result->quantization,
+        PREC_HDR_QUANTIZATION_SIZE);                        // Q
+    bitpacker_write(bitstream, ra_result->refinement,
+        PREC_HDR_REFINEMENT_SIZE);                          // R
+    for (int band = 0; band < bands_count_of(precinct); ++band)
+    {
+        int sig = gcli_method_get_signaling(...);
+        bitpacker_write(bitstream, sig, GCLI_METHOD_NBITS); // 3 bit/band
+    }
+    bitpacker_align(bitstream, PREC_HDR_ALIGNMENT);         // 对齐 8 bit
+
+    // (2) 逐 subpacket 打包
+    subpkt = 0;
+    for (idx_start = idx_stop = 0; idx_stop < position_count; idx_stop++)
+    {
+        if ((idx_stop != position_count - 1) &&
+            (precinct_subkt_of(precinct, idx_stop) ==
+             precinct_subkt_of(precinct, idx_stop + 1)))
+            continue;  // 同一 subpacket，继续累积
+
+        // (3) Packet Header
+        bitpacker_write(bitstream, raw_fallback, 1);        // Dr
+        bitpacker_write(bitstream, size_data >> 3, ...);    // Ldata
+        bitpacker_write(bitstream, size_gcli >> 3, ...);    // Lgcli
+        bitpacker_write(bitstream, size_sign >> 3, ...);    // Lsign
+        bitpacker_align(bitstream, PKT_HDR_ALIGNMENT);      // 对齐 8 bit
+
+        // (4) Sig flags (if Dr=0)
+        pack_gclis_significance(ctx, bitstream, ...);
+        bitpacker_align(bitstream, SUBPKT_ALIGNMENT);       // 对齐 4 bit
+
+        // (5) GCLI data
+        for (idx = idx_start; idx <= idx_stop; idx++)
+            pack_gclis(ctx, bitstream, precinct, ...);
+        bitpacker_align(bitstream, SUBPKT_ALIGNMENT);
+
+        // (6) Coefficient data
+        for (idx = idx_start; idx <= idx_stop; idx++)
+        {
+            gtli = ra_result->gtli_table_data[lvl];
+            pack_data(bitstream, data, width, gclis,
+                      group_size, gtli, sign_packing);
+        }
+        bitpacker_align(bitstream, SUBPKT_ALIGNMENT);
+
+        // (7) Sign data (if Fs=1)
+        if (sign_packing == 1)
+            pack_sign(bitstream, data, width, gclis, group_size, gtli);
+        bitpacker_align(bitstream, SUBPKT_ALIGNMENT);
+
+        // (8) 长度校验
+        assert(bitpacker_len == expected_len);
+
+        ++subpkt;
+        idx_start = idx_stop + 1;
+    }
+    // (9) Padding 到 Lprc 声明的长度
+}
+\end{lstlisting}
+
+\begin{engineeringnote}
+\textbf{逐段解释}：
+\begin{itemize}
+  \item \textbf{(1) Precinct Header}：先写 Lprc（数据总长度），Q（量化），R（细化），每个 band 的 3 bit signaling。
+  \item \textbf{(2)--(8) Subpacket 打包}：遍历 \texttt{pi[]} 数组，按 subpacket 分组。每组依次写 packet header、sig flags、GCLI、data、sign。
+  \item \textbf{(9) Padding}：如果实际写入长度小于 Lprc 声明的长度，填充 0 对齐。
+\end{itemize}
+\end{engineeringnote}
+
+\subsection{源码摘录：\texttt{pack\_data()}}
+
+\begin{lstlisting}[language=C,numbers=none]
+int pack_data(bit_packer_t* bitstream, sig_mag_data_t* buf, int buf_len,
+    gcli_data_t* gclis, int group_size, int gtli,
+    const uint8_t sign_packing)
+{
+    int idx = 0, bit_len = 0;
+    for (int group = 0; group < (buf_len + group_size - 1) / group_size; group++)
+    {
+        if (gclis[group] > gtli)                             // (1) 该组有数据
+        {
+            if (sign_packing == 0)                            // (2) Fs=0: 联合符号
+            {
+                for (int i = 0; i < group_size; i++)
+                    bit_len += bitpacker_write(bitstream,
+                        buf[idx + i] >> SIGN_BIT_POSITION, 1);
+            }
+            for (int bp = gclis[group] - 1; bp >= gtli; --bp) // (3) 逐 bitplane
+            {
+                for (int i = 0; i < group_size; i++)
+                    bit_len += bitpacker_write(bitstream,
+                        buf[idx + i] >> bp, 1);
+            }
+        }
+        idx += group_size;
+    }
+    return bit_len;
+}
+\end{lstlisting}
+
+\begin{engineeringnote}
+\textbf{逐段解释}：
+\begin{itemize}
+  \item \textbf{(1)} 只有 $\texttt{gcli} > \texttt{gtli}$ 的组才编码（否则全零，已跳过）。
+  \item \textbf{(2)} $F_s = 0$ 时，每个 bitplane 前先写 4 个符号位（每个系数 1 bit）。
+  \item \textbf{(3)} 从 MSB (gcli$-1$) 到 LSB (gtli)，逐 bitplane 写入。每个 bitplane 写 4 个 bit（每组 4 个系数各 1 bit）。
+\end{itemize}
+\end{engineeringnote}
+
+\section{算例}
+
+\begin{examplebox}[title={单组系数的 Data Packing}]
+
+\textbf{输入}：1 个 band 行，$N_g = 4$，$F_s = 0$（jointly），$\mathrm{GTLI} = 2$。
+
+4 个 sign-magnitude 系数（已左移回原始 bitplane 位置）：
+
+\begin{table}[H]
+\centering
+\begin{tabular}{@{}rclr@{}}
+\toprule
+索引 & 系数值 & 符号 & 幅度 \\
+\midrule
+0 & \texttt{0x0000001C} & $+$ & 28 \\
+1 & \texttt{0x00000005} & $+$ & 5 \\
+2 & \texttt{0x8000000A} & $-$ & 10 \\
+3 & \texttt{0x00000000} & $+$ & 0 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+$\mathrm{GCLI} = \mathrm{BSR}(28\,|\,5\,|\,10\,|\,0) + 1 = \mathrm{BSR}(31) + 1 = 4 + 1 = 5$。
+
+\medskip
+\textbf{Step 1：写符号位}（$F_s=0$，每个 bitplane 前写 4 个符号 bit）：
+\begin{lstlisting}[numbers=none]
+sign bits: 0, 0, 1, 0  （系数 0 正, 1 正, 2 负, 3 正）
+\end{lstlisting}
+
+\textbf{Step 2：bitplane 4（MSB）}——从 $\mathrm{GCLI}-1 = 4$ 开始：
+\begin{lstlisting}[numbers=none]
+bp=4: buf[0]>>4 = 0, buf[1]>>4 = 0, buf[2]>>4 = 0, buf[3]>>4 = 0
+写入: 0 0 0 0
+\end{lstlisting}
+
+\textbf{Step 3：bitplane 3}：
+\begin{lstlisting}[numbers=none]
+bp=3: buf[0]>>3 = 1, buf[1]>>3 = 0, buf[2]>>3 = 1, buf[3]>>3 = 0
+写入: 1 0 1 0
+\end{lstlisting}
+
+\textbf{Step 4：bitplane 2}（$\mathrm{GTLI} = 2$，这是最后一个写入的 bitplane）：
+\begin{lstlisting}[numbers=none]
+bp=2: buf[0]>>2 = 1, buf[1]>>2 = 1, buf[2]>>2 = 0, buf[3]>>2 = 0
+写入: 1 1 0 0
+\end{lstlisting}
+
+\textbf{完整 bit 流}（1 组）：
+\begin{lstlisting}[numbers=none]
+符号: 0 0 1 0  |  bp=4: 0 0 0 0  |  bp=3: 1 0 1 0  |  bp=2: 1 1 0 0
+\end{lstlisting}
+
+总计：$4 \text{ (sign)} + 4 \times 3 \text{ (data)} = \mathbf{16 \text{ bit}} = 2$ bytes。
+
+验证：$(\mathrm{GCLI} - \mathrm{GTLI} + 1) \times \mathit{group\_size} = (5 - 2 + 1) \times 4 = 16$ bit \checkmark
+\end{examplebox}
+
+\section{Bitpacker 实现}
+
+\texttt{bitpacking.c} 提供了打包/解包的底层 API：
+
+\begin{table}[H]
+\centering
+\caption{Bitpacker API}
+\label{tab:bitpacker-api}
+\begin{tabular}{@{}ll@{}}
+\toprule
+函数 & 用途 \\
+\midrule
+\texttt{bitpacker\_write(stream, val, nbits)} & 写入 $n$ 位 \\
+\texttt{bitpacker\_align(stream, n)} & 填充 0 直到 $n$ 位对齐 \\
+\texttt{bitpacker\_add\_padding(stream, n)} & 添加 $n$ 个 padding bit \\
+\texttt{bitpacker\_flush(stream)} & 刷新剩余 bit \\
+\texttt{bitunpacker\_read(stream, \&val, n)} & 读取 $n$ 位 \\
+\texttt{bitunpacker\_align(stream, n)} & 跳过直到对齐 \\
+\texttt{bitunpacker\_skip(stream, n)} & 跳过 $n$ 位 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{流程图}
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[
+    node distance=0.6cm,
+    block/.style={rectangle, draw, fill=blue!10, text width=4cm, text centered, minimum height=0.7cm, font=\small},
+    arrow/.style={-{Stealth[length=2.5mm]}, thick}
+]
+    \node[block] (input) {量化后系数};
+    \node[block, below=of input] (pack) {\texttt{pack\_precinct}};
+    \node[block, below=of pack] (hdr) {写 Precinct Header:\\Lprc, Q, R, band methods};
+    \node[block, below=of hdr] (subpkt) {逐 subpacket 处理};
+    \node[block, below=of subpkt] (pkthdr) {写 Packet Header:\\Dr, Ldata, Lgcli, Lsign};
+    \node[block, below=of pkthdr] (sigf) {写 sig flags};
+    \node[block, below=of sigf] (gcli) {写 GCLI data};
+    \node[block, below=of gcli] (coeff) {写 coefficient data};
+    \node[block, below=of coeff] (sign) {写 sign data};
+    \node[block, below=of sign] (pad) {padding 对齐};
+    \node[block, below=of pad] (out) {输出码流 bytes};
+
+    \draw[arrow] (input) -- (pack);
+    \draw[arrow] (pack) -- (hdr);
+    \draw[arrow] (hdr) -- (subpkt);
+    \draw[arrow] (subpkt) -- (pkthdr);
+    \draw[arrow] (pkthdr) -- (sigf);
+    \draw[arrow] (sigf) -- (gcli);
+    \draw[arrow] (gcli) -- (coeff);
+    \draw[arrow] (coeff) -- (sign);
+    \draw[arrow] (sign) -- (pad);
+    \draw[arrow] (pad) -- (out);
+\end{tikzpicture}
+\caption{Precinct 打包流程图}
+\label{fig:packing-flowchart}
+\end{figure}
+
+\section{实现映射}
+
+\begin{implmap}
+\begin{tabular}{@{}L{2.8cm}L{3.5cm}L{3.5cm}L{4.5cm}@{}}
+\toprule
+标准概念 & 入口文件 & 关键函数/结构 & 说明 \\
+\midrule
+打包总入口 & \btt{packing.c:605} & \btt{pack\_precinct()} & 打包一个 precinct \\
+解包总入口 & \btt{packing.c:780} & \btt{unpack\_precinct()} & 解包一个 precinct \\
+数据打包 & \btt{packing.c:172} & \btt{pack\_data()} & 逐 bitplane 打包系数 \\
+数据解包 & \btt{packing.c:201} & \btt{unpack\_data()} & 逐 bitplane 解包 \\
+符号打包 & \btt{packing.c:233} & \btt{pack\_sign()} & 独立符号段打包 \\
+GCLI 打包 & \btt{packing.c:476} & \btt{pack\_gclis()} & GCLI 编码 \\
+Marker 写入 & \btt{xs\_markers.c:756} & \btt{xs\_write\_head()} & 写入所有 header marker \\
+Marker 解析 & \btt{xs\_markers.c:673} & \btt{xs\_parse\_head()} & 解析 header marker \\
+Bitpacker & \btt{bitpacking.c:253} & \btt{bitpacker\_write()} 等 & 底层 bit 操作 \\
+\bottomrule
+\end{tabular}
+\end{implmap}
+
+\begin{codefact}
+本章关键结论依据以下函数：
+\begin{itemize}
+  \item \texttt{pack\_precinct()} --- \texttt{packing.c:605} --- 打包一个 precinct（header + subpacket）
+  \item \texttt{unpack\_precinct()} --- \texttt{packing.c:780} --- 解包一个 precinct
+  \item \texttt{pack\_data()} --- \texttt{packing.c:172} --- 逐 bitplane 打包系数数据
+  \item \texttt{pack\_gclis()} --- \texttt{packing.c:476} --- GCLI unary 编码
+  \item \texttt{xs\_write\_head()} --- \texttt{xs\_markers.c:756} --- 写入所有 header marker
+\end{itemize}
+\end{codefact}
+
+\section{常见误解}
+
+\begin{misunderstanding}
+\begin{enumerate}
+  \item \textbf{``每个 precinct 独立打包''} --- 是的，每个 precinct 的数据是自包含的（有自己的 header），可以独立解码。
+  \item \textbf{``Sign 总是和数据一起打包''} --- 不一定。$F_s = 0$ 时符号位混在数据 bitplane 中（jointly）；$F_s = 1$ 时符号位单独打包（separate）。
+  \item \textbf{``Marker 长度字段包含 marker 本身''} --- Marker 长度字段（如 Lpih, Lcdt）通常包含 marker ID（2 字节）和长度字段（2 字节）之后的内容长度。
+\end{enumerate}
+\end{misunderstanding}
+
+\section{本章小结}
+
+打包是 JPEG XS 编码管线的最后一步，将 GCLI、系数数据、符号位和 marker 段组装成完整的码流。每个 precinct 独立打包，subpacket 按 sigf $\to$ gcli $\to$ data $\to$ sign 的顺序组织。Marker 段定义了图像参数和编码配置。
+
+下一章将讲解解码器的完整逆向路径：从码流解析到图像重建。

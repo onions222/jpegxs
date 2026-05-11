@@ -1,0 +1,431 @@
+% gcli-gtli-and-budget-examples.tex — GCLI、GTLI 与预算算例
+% Source: examples/gcli-gtli-and-budget-examples.md (expanded)
+
+\chapter{GCLI、GTLI 与预算算例}\label{ex:gcli-gtli-budget}
+
+对应章节：第 \ref{ch:gcli} 章（GCLI、预测与显著性模型）。
+
+\begin{examplebox}[title={例 1：极小例子——从 4 个系数到 GCLI}]
+
+这是本章正文中的最小直觉例子的完整展开版。
+
+\medskip
+\textbf{输入条件}：一组 4 个系数的幅度值：$[3, 7, 2, 5]$。
+
+\medskip
+\textbf{Step 1}：写出每个数的二进制
+
+\begin{lstlisting}[numbers=none]
+3 = 0b0011
+7 = 0b0111
+2 = 0b0010
+5 = 0b0101
+\end{lstlisting}
+
+\textbf{Step 2}：按位 OR
+
+\begin{lstlisting}[numbers=none]
+0b0011
+0b0111
+0b0010
+0b0101
+------
+0b0111 = 7
+\end{lstlisting}
+
+OR 的效果：只要任意一个数在某个 bit 上是 1，结果就是 1。所以 OR 保留了这组数用到的所有 bitplane。
+
+\textbf{Step 3}：BSR（最高非零位）
+
+$7 = \texttt{0b111}$，最高非零位是 bit 2。$\mathrm{BSR}(7) = 2$。
+
+\textbf{Step 4}：GCLI = BSR + 1
+
+$\mathrm{GCLI} = 2 + 1 = 3$。
+
+\medskip
+\textbf{结果解读}：
+
+GCLI = 3 意味着这组系数最多需要 3 个 bitplane（bitplane 2、1、0）来表示。编码器从 bitplane 2 开始编码，bitplane 3 及以上全是零，无需编码。
+
+如果量化后 GTLI = 1，那么实际只编码 bitplane 2 和 1（$\mathrm{GCLI}-1$ 到 $\mathrm{GTLI}$），bitplane 0 被截断丢弃。
+
+\medskip
+\textbf{与代码位置对应}：本例验证 \texttt{compute\_gcli\_buf()}（\texttt{precinct.c:288}）的 OR $\to$ BSR+1 计算。
+\end{examplebox}
+
+\begin{examplebox}[title={例 2：GCLI 编码全流程}]
+
+\textbf{输入条件}：一个 band 行有 16 个系数（sign-magnitude），使用垂直预测，上方 precinct 对应位置的 GCLI 已知。
+
+\medskip
+\textbf{已知参数}：
+
+\begin{tabular}{@{}lc@{}}
+\toprule
+参数 & 值 \\
+\midrule
+系数个数 & 16 \\
+$N_g$（组大小） & 4 \\
+系数值（幅度） & $[0, 0, 0, 0, 3, 7, 2, 5, 12, 15, 8, 11, 1, 0, 4, 3]$ \\
+上方预测 GCLI & $[0, 3, 4, 1]$ \\
+Run 模式 & ZRF（$R_m = 0$） \\
+\bottomrule
+\end{tabular}
+
+\medskip
+\textbf{Step 1}：计算 GCLI
+
+\begin{lstlisting}[numbers=none]
+Group 0: or_all = 0|0|0|0 = 0       -> GCLI = 0
+Group 1: or_all = 3|7|2|5 = 0b111=7 -> GCLI = BSR(7)+1 = 3
+Group 2: or_all = 12|15|8|11=0b1111 -> GCLI = BSR(15)+1 = 4
+Group 3: or_all = 1|0|4|3 = 0b111=7 -> GCLI = BSR(7)+1 = 3
+\end{lstlisting}
+
+GCLI 数组：$[0, 3, 4, 3]$
+
+\textbf{Step 2}：垂直预测残差
+
+\begin{lstlisting}[numbers=none]
+Pred:    [0, 3, 4, 1]
+GCLI:    [0, 3, 4, 3]
+Residue: [0, 0, 0, +2]
+\end{lstlisting}
+
+\textbf{Step 3}：ZRF 显著性标志
+
+ZRF 模式：预测残差为零的 GCLI 组被跳过。为便于说明，本例每个 GCLI 组对应 1 个 sigflag 位；在实际实现中，sigflag 的粒度由 $S_s$ 控制（默认 $S_s=8$，即 8 个 GCLI 值共享 1 个 sigflag bit，详见第 \ref{ch:gcli} 章）。
+
+\begin{lstlisting}[numbers=none]
+Group 0: residue=0 -> sig_flag = 0 (跳过)
+Group 1: residue=0 -> sig_flag = 0 (跳过)
+Group 2: residue=0 -> sig_flag = 0 (跳过)
+Group 3: residue=2 -> sig_flag = 1 (编码)
+\end{lstlisting}
+
+显著性标志：$[0, 0, 0, 1]$（教学简化，实际实现中 $\lceil4/S_s\rceil$ 个位）
+
+\textbf{Step 4}：Unary 编码（只编码非跳过组）
+
+只有 Group 3 需要编码。预测残差 $= +2$。
+
+带符号 unary 编码（4-clipped alphabet）：
+
+\begin{lstlisting}[numbers=none]
++2 -> 编码值 = 5 (0,0,0,0,0,1 -> 长度 6 bit)
+\end{lstlisting}
+
+编码输出：1（标志位）+ \texttt{000001}（unary）= 7 bit。
+
+\medskip
+\textbf{最终结果}：
+\begin{itemize}
+  \item GCLI 数组：$[0, 3, 4, 3]$
+  \item 预测残差：$[0, 0, 0, +2]$
+  \item 显著性标志：$[0, 0, 0, 1]$
+  \item 编码输出：7 bit（仅 Group 3 编码）
+\end{itemize}
+
+\medskip
+\textbf{与代码位置对应}：本例验证 \texttt{compute\_gcli\_buf()}（\texttt{precinct.c:288}）的 GCLI 计算和 \texttt{update\_gclis()}（\texttt{precinct.c:312}）的预测残差计算。
+\end{examplebox}
+
+\begin{examplebox}[title={例 2b：Unary 编码详细示例}]
+
+本例展示带符号 unary 编码（4-clipped alphabet）的完整编解码过程。
+
+\medskip
+\textbf{输入条件}：经过 sigflag 过滤后，需要编码的 5 个预测残差：$[0, +1, -2, 0, +3]$。
+
+\medskip
+\textbf{编码过程}：
+
+对照 4-clipped signed alphabet：
+
+\begin{table}[H]
+\centering
+\begin{tabular}{@{}rclc@{}}
+\toprule
+残差 & 0 的个数 & 编码 & 位数 \\
+\midrule
+0 & 0 & \texttt{1} & 1 \\
++1 & 2 & \texttt{001} & 3 \\
+$-2$ & 3 & \texttt{0001} & 4 \\
+0 & 0 & \texttt{1} & 1 \\
++3 & 6 & \texttt{0000001} & 7 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+编码规则：先写 $n$ 个 0（$n$ 的奇偶编码正负），再写终止的 1。具体：残差 0 $\to$ $n=0$；负值 $-(k)$ $\to$ $n = 2k-1$；正值 $+k$ $\to$ $n = 2k$。
+
+\textbf{完整 bit 流}：
+
+\begin{lstlisting}[numbers=none]
+残差序列:  0    +1     -2     0      +3
+编码:      1 | 001 | 0001 | 1 | 0000001
+           ↑    ↑      ↑    ↑     ↑
+           └────┴──────┴────┴─────┘  ← 串联，共 16 bit
+\end{lstlisting}
+
+\textbf{解码过程}：
+
+解码规则：读 0 直到遇到 1，数 0 的个数 $n$：
+\begin{itemize}
+  \item $n = 0$ $\to$ 值 $= 0$
+  \item $n$ 为奇数 $\to$ 值 $= -(n+1)/2$
+  \item $n$ 为偶数（$>0$）$\to$ 值 $= +n/2$
+\end{itemize}
+
+\begin{lstlisting}[numbers=none]
+读取 1       → 0 个零 → 值 = 0           ✓
+读取 001     → 2 个零 → 值 = +2/2 = +1   ✓
+读取 0001    → 3 个零 → 值 = -(4/2) = -2 ✓
+读取 1       → 0 个零 → 值 = 0           ✓
+读取 0000001 → 6 个零 → 值 = +6/2 = +3   ✓
+\end{lstlisting}
+
+\medskip
+\textbf{最终结果}：5 个残差编码为 16 bit 的 bit 流。解码器逐段读取，完全恢复原始值。
+
+\medskip
+\textbf{与代码位置对应}：本例验证 \texttt{unary\_encode()}（\texttt{packing.c:271}）的带符号 unary 编码和 \texttt{single\_value\_budget\_getunary()}（\texttt{budget.c:67}）的编码长度计算。
+\end{examplebox}
+
+\begin{examplebox}[title={例 2c：Bounded 编码示例}]
+
+本例展示 bounded 编码如何利用 GTLI 信息缩小编码范围。
+
+\medskip
+\textbf{输入条件}：一个 band 行的一组 GCLI 残差需要编码。已知 $\mathit{predictor} = 4, \mathit{GTLI} = 2$。
+
+\medskip
+\textbf{Step 1}：计算有效范围
+
+对照 \texttt{bounded\_code\_get\_min\_max()}（\texttt{bitpacking.c:304}）：
+
+\begin{lstlisting}[numbers=none]
+min_allowed = -MAX(predictor - GTLI, 0) = -MAX(4-2, 0) = -2
+max_allowed = MAX(15 - MAX(predictor, GTLI), 0) = MAX(15-4, 0) = 11
+\end{lstlisting}
+
+有效残差范围：$[-2, 11]$，共 14 个可能值。
+
+为什么 $\texttt{min\_allowed} = -2$？因为 $\mathrm{GCLI} = \mathit{predictor} + \mathit{residual}$，而 GCLI 不能低于 $\mathrm{GTLI} = 2$，所以 $\mathit{residual} \geq \mathrm{GTLI} - \mathit{predictor} = 2 - 4 = -2$。
+
+\textbf{Step 2}：编码残差
+
+对照 \texttt{bounded\_code\_get\_unary\_code()}（\texttt{bitpacking.c:311}）：
+
+$\mathit{trigger} = |\texttt{min\_allowed}| = 2$
+
+编码规则：$\mathit{aval} = |\mathit{val}|$
+\begin{itemize}
+  \item 若 $\mathit{aval} \leq \mathit{trigger}$（在 trigger 范围内）：正负交替编码
+    \begin{itemize}
+      \item 负值 $\mathit{val} = -k$：编码 $= 2k - 1$
+      \item 非负 $\mathit{val} = k$：编码 $= 2k$
+    \end{itemize}
+  \item 若 $\mathit{aval} > \mathit{trigger}$（超出 trigger）：编码 $= \mathit{trigger} + \mathit{aval}$
+\end{itemize}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{@{}rccll@{}}
+\toprule
+残差值 & aval & $\leq$ trigger? & 编码值 & unary 输出 \\
+\midrule
+0 & 0 & 是 & $2 \times 0 = 0$ & \texttt{1} \\
+$-1$ & 1 & 是 & $2 \times 1 - 1 = 1$ & \texttt{01} \\
+$+1$ & 1 & 是 & $2 \times 1 = 2$ & \texttt{001} \\
+$-2$ & 2 & 是 & $2 \times 2 - 1 = 3$ & \texttt{0001} \\
+$+2$ & 2 & 是 & $2 \times 2 = 4$ & \texttt{00001} \\
+$+5$ & 5 & 否 & $2 + 5 = 7$ & \texttt{00000001} \\
+$+10$ & 10 & 否 & $2 + 10 = 12$ & $0^{12}1$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\textbf{对比标准 4-clipped unary}：
+
+同样编码残差 +5：
+\begin{itemize}
+  \item 标准 4-clipped：$5 + 4 = 9$ bit
+  \item Bounded（$\mathrm{GTLI}=2$）：$8$ bit
+\end{itemize}
+
+同样编码残差 +10：
+\begin{itemize}
+  \item 标准 4-clipped：$10 + 4 = 14$ bit
+  \item Bounded（$\mathrm{GTLI}=2$）：$13$ bit
+\end{itemize}
+
+\begin{engineeringnote}
+bounded 编码的节省来自排除了``不可能的残差值''。当 GTLI 较大时（例如 $\mathrm{GTLI}=8$），$\texttt{min\_allowed} = -(\mathit{predictor} - 8)$ 更接近 0，有效范围更窄，节省更明显。但 bounded 编码需要解码端也已知 predictor 和 GTLI，所以只能在这些信息可用时使用。
+\end{engineeringnote}
+
+\medskip
+\textbf{最终结果}：Bounded 编码通过利用 GTLI 约束残差范围，每值平均节省 1--2 bit（取决于 GTLI 大小）。
+
+\medskip
+\textbf{与代码位置对应}：本例验证 \texttt{bounded\_code\_get\_min\_max()}（\texttt{bitpacking.c:304}）和 \texttt{bounded\_code\_get\_unary\_code()}（\texttt{bitpacking.c:311}）的 bounded 编码映射。
+\end{examplebox}
+
+\begin{examplebox}[title={例 3：GTLI 表计算}]
+
+\textbf{输入条件}：4 个 band，给定 gains 和 priorities，计算指定 Q/R 下的 GTLI 表。
+
+\medskip
+\textbf{已知参数}：
+
+\begin{tabular}{@{}lc@{}}
+\toprule
+参数 & 值 \\
+\midrule
+Band gains & $[2, 1, 0, 1]$ \\
+Band priorities & $[0, 1, 2, 3]$ \\
+$Q$ & 3 \\
+$R$ & 2 \\
+\bottomrule
+\end{tabular}
+
+\medskip
+\textbf{Step 1}：计算每个 band 的 GTLI
+
+$\mathit{GTLI}_b = \mathrm{clip}(Q - \mathit{gain}_b - [\mathit{priority}_b < R],\; 0,\; 15)$
+
+\begin{lstlisting}[numbers=none]
+Band 0: GTLI = clip(3 - 2 - (0<2?1:0), 0, 15) = clip(3-2-1, 0, 15) = 0
+Band 1: GTLI = clip(3 - 1 - (1<2?1:0), 0, 15) = clip(3-1-1, 0, 15) = 1
+Band 2: GTLI = clip(3 - 0 - (2<2?1:0), 0, 15) = clip(3-0-0, 0, 15) = 3
+Band 3: GTLI = clip(3 - 1 - (3<2?1:0), 0, 15) = clip(3-1-0, 0, 15) = 2
+\end{lstlisting}
+
+GTLI 表：$[0, 1, 3, 2]$
+
+\textbf{Step 2}：解读
+\begin{itemize}
+  \item Band 0（gain=2, priority=0）：GTLI=0，保留所有 bitplane（gain 高 + 优先级高被 R 额外截断）
+  \item Band 1（gain=1, priority=1）：GTLI=1，丢弃 1 个 bitplane
+  \item Band 2（gain=0, priority=2）：GTLI=3，丢弃 3 个 bitplane（gain 低 + priority $\geq$ R 不额外截断）
+  \item Band 3（gain=1, priority=3）：GTLI=2，丢弃 2 个 bitplane
+\end{itemize}
+
+\medskip
+\textbf{最终结果}：GTLI 表 $[0, 1, 3, 2]$。
+
+\medskip
+\textbf{与代码位置对应}：本例验证 \texttt{compute\_gtli()}（\texttt{sb\_weighting.c:58}）和 \texttt{compute\_gtli\_tables()}（\texttt{sb\_weighting.c:68}）的 GTLI 表计算。
+\end{examplebox}
+
+\begin{examplebox}[title={例 4：预算表计算}]
+
+\textbf{输入条件}：1 个 subpacket 包含 4 个 band 行，给定每行的 GCLI、GTLI 和系数个数。
+
+\medskip
+\textbf{已知参数}：
+
+\begin{tabular}{@{}lccl@{}}
+\toprule
+Band 行 & 系数个数 & GCLI 组值 & GTLI \\
+\midrule
+0 & 8 & $[2, 3]$ & 1 \\
+1 & 8 & $[4, 3]$ & 2 \\
+2 & 4 & $[1]$ & 0 \\
+3 & 4 & $[0]$ & 0 \\
+\bottomrule
+\end{tabular}
+
+\medskip
+\textbf{Step 1}：GCLI 预算
+
+每个 GCLI 值直接编码（无预测），$4 \text{ bit} \times$ GCLI 组数。
+
+\begin{lstlisting}[numbers=none]
+Band 0: 2 groups x 4 bit = 8 bit
+Band 1: 2 groups x 4 bit = 8 bit
+Band 2: 1 group x 4 bit = 4 bit
+Band 3: 1 group x 4 bit = 4 bit
+Total GCLI: 24 bit
+\end{lstlisting}
+
+\textbf{Step 2}：Data 预算
+
+每个组只编码 bitplane $\mathit{GCLI} - 1$ 到 $\mathit{GTLI}$（含），每个 bitplane 每个系数 1 bit。
+
+\begin{lstlisting}[numbers=none]
+Band 0, group 0: GCLI=2, GTLI=1 -> 1 bitplane x 4 coeff = 4 bit
+Band 0, group 1: GCLI=3, GTLI=1 -> 2 bitplanes x 4 coeff = 8 bit
+Band 1, group 0: GCLI=4, GTLI=2 -> 2 bitplanes x 4 coeff = 8 bit
+Band 1, group 1: GCLI=3, GTLI=2 -> 1 bitplane x 4 coeff = 4 bit
+Band 2, group 0: GCLI=1, GTLI=0 -> 1 bitplane x 4 coeff = 4 bit
+Band 3, group 0: GCLI=0, GTLI=0 -> 0 (全零组)
+Total Data: 28 bit
+\end{lstlisting}
+
+\textbf{Step 3}：总预算
+
+\begin{lstlisting}[numbers=none]
+GCLI: 24 bit
+Data: 28 bit
+Sign: 0 bit (Fs=0, jointly)
+Sigf: 0 bit (无 run 模式)
+Total: 52 bit = 6.5 bytes -> 7 bytes (对齐)
+\end{lstlisting}
+
+\medskip
+\textbf{最终结果}：总编码量 = 52 bit（GCLI 24 + Data 28 + Sign 0 + Sigf 0）。
+
+\medskip
+\textbf{与代码位置对应}：本例验证 \texttt{fill\_gcli\_budget\_table()}（\texttt{gcli\_budget.c:226}）和 \texttt{fill\_data\_budget\_table()}（\texttt{data\_budget.c:118}）的预算表填充。
+\end{examplebox}
+
+\begin{examplebox}[title={例 5：GTLI 对编码量的影响}]
+
+\textbf{输入条件}：1 个 band，16 个系数，分 4 组，比较不同 GTLI 下的编码量。
+
+\medskip
+\textbf{已知参数}：
+
+\begin{tabular}{@{}lc@{}}
+\toprule
+参数 & 值 \\
+\midrule
+系数个数 & 16（4 组 $\times$ 4 系数） \\
+GCLI & $[4, 3, 5, 2]$ \\
+$N_g$ & 4 \\
+比较 & GTLI = 0 vs GTLI = 2 \\
+\bottomrule
+\end{tabular}
+
+\medskip
+\textbf{GTLI = 0}（无量化）：
+
+\begin{lstlisting}[numbers=none]
+每组编码 bitplane 数 = GCLI - GTLI
+Group 0: (4-0) x 4 = 16 bit
+Group 1: (3-0) x 4 = 12 bit
+Group 2: (5-0) x 4 = 20 bit
+Group 3: (2-0) x 4 = 8 bit
+Total: 56 bit
+\end{lstlisting}
+
+\textbf{GTLI = 2}（截断 2 个 bitplane）：
+
+\begin{lstlisting}[numbers=none]
+Group 0: (4-2) x 4 = 8 bit
+Group 1: (3-2) x 4 = 4 bit
+Group 2: (5-2) x 4 = 12 bit
+Group 3: (2-2) x 4 = 0 bit (GCLI <= GTLI, 整组清零)
+Total: 24 bit
+\end{lstlisting}
+
+节省：$56 - 24 = 32$ bit（57\% 减少）。Group 3 完全被清零。
+
+\medskip
+\textbf{最终结果}：GTLI=0 时总编码量 56 bit，GTLI=2 时总编码量 24 bit，节省 57\%。
+
+\medskip
+\textbf{与代码位置对应}：本例验证 \texttt{quant()}（\texttt{quant.c:129}）的 bitplane 截断效果。
+\end{examplebox}

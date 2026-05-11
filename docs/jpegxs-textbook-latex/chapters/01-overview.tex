@@ -1,0 +1,58 @@
+% 01-overview.tex — JPEG XS 概述与设计目标
+
+\chapter{JPEG XS 概述与设计目标}\label{ch:overview}
+
+\section{本章目标}
+
+\begin{itemize}
+  \item 理解 JPEG XS 的设计动机和应用场景
+  \item 了解编码管线的整体架构
+  \item 理解各模块之间的数据流转关系
+\end{itemize}
+
+\section{设计动机}
+
+JPEG XS（ISO/IEC 21122）是面向专业视频和图像应用的轻量级压缩标准。与传统图像压缩（如 JPEG、JPEG 2000）不同，JPEG XS 的设计目标是：
+
+\begin{itemize}
+  \item \textbf{低延迟}：编码延迟在几行像素级别，不需要缓存整帧
+  \item \textbf{低复杂度}：计算量适合 FPGA 和 ASIC 实现
+  \item \textbf{视觉无损}：在目标压缩比（2--6$\times$）下，人眼不可区分
+  \item \textbf{可逆}：支持 mathematically lossless 模式
+\end{itemize}
+
+典型应用包括：专业视频制作、机器视觉、汽车传感器、医疗影像等。
+
+\section{编码管线}
+
+JPEG XS 的编码管线由以下步骤组成（按执行顺序）：
+
+\begin{enumerate}
+  \item \textbf{NLT}（Non-Linear Transform）：将无符号像素映射为以零为中心的有符号系数
+  \item \textbf{MCT}（Multiple Component Transform）：颜色空间变换（RCT 或 ICT）
+  \item \textbf{DWT}（Discrete Wavelet Transform）：5/3 Le Gall 小波分解
+  \item \textbf{Precinct 提取}：将子带系数组织为 precinct 结构
+  \item \textbf{GCLI 计算}：计算每个组的全局 CLI 值
+  \item \textbf{码率控制}：通过 Q/R 搜索分配预算
+  \item \textbf{量化}：根据 GTLI 截断 bitplane
+  \item \textbf{打包}：组装 marker 段和数据段，生成码流
+\end{enumerate}
+
+\begin{equation}
+\text{RGB} \xrightarrow{\text{NLT}} \xrightarrow{\text{MCT}} \text{YUV} \xrightarrow{\text{DWT}} \text{子带} \xrightarrow{\text{Precinct}} \xrightarrow{\text{GCLI}} \xrightarrow{\text{RC}} \xrightarrow{\text{Quant}} \xrightarrow{\text{Pack}} \text{Codestream}
+\end{equation}
+
+\section{实现映射}
+
+\begin{implmap}
+\begin{tabular}{@{}L{2.0cm}L{2.0cm}L{3.0cm}L{4.5cm}@{}}
+\toprule
+标准概念 & 入口文件 & 关键函数/结构 & 说明 \\
+\midrule
+编码器总入口 & \btt{xs\_enc.c} & \btt{xs\_enc\_image()} & 单帧编码入口 \\
+解码器总入口 & \btt{xs\_dec.c} & \btt{xs\_dec\_image()} & 单帧解码入口 \\
+编码配置 & \btt{xs\_config.c} & \btt{xs\_config\_init()} & 参数初始化 \\
+图像数据 & \btt{xs\_image.h} & \btt{xs\_image\_t} & 图像存储结构 \\
+\bottomrule
+\end{tabular}
+\end{implmap}

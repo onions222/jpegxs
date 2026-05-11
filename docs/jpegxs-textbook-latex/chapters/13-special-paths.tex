@@ -1,0 +1,371 @@
+% 13-special-paths.tex — 特殊路径：Bayer、Tetrix 与 Profile 约束
+% Source: chapters/13-special-paths-bayer-tetrix-and-profile-constraints.md
+
+\chapter{特殊路径：Bayer、Tetrix 与 Profile 约束}\label{ch:special-paths}
+
+\section{本章目标}
+
+\begin{itemize}
+  \item 理解 Bayer CFA 图像在 JPEG XS 中的处理方式
+  \item 掌握 Star-Tetrix 变换的 4 遍扫描机制
+  \item 理解 Profile/Level/Sublevel 三层约束体系
+  \item 了解 MLS（Mathematically Lossless）和 DWT 抑制路径
+\end{itemize}
+
+\section{背景与标准语义}
+
+JPEG XS 支持多种特殊输入路径，其中最重要的是 \textbf{Bayer CFA}（Color Filter Array）图像。Bayer 图像每个像素只有一个颜色分量（R/G/B 之一），通过 CFA 模式（RGGB/BGGR/GRBG/GBRG）排列。JPEG XS 使用 \textbf{Star-Tetrix} 变换将 Bayer 数据分解为 4 个虚拟分量，再分别编码。
+
+Profile/Level/Sublevel 三层约束体系确保不同实现之间的互操作性。
+
+\section{Bayer 到 4 分量的预处理}
+
+\subsection{\texttt{mct\_bayer\_to\_4()}}
+
+Bayer 输入是单分量图像，尺寸为 $W \times H$。预处理将其转换为 4 分量图像，每个分量尺寸为 $W/2 \times H/2$。
+
+\begin{lstlisting}[numbers=none]
+RGGB 模式下的 2x2 块：
++----+----+
+| R  | G1 |   ->  comp[0]=R,  comp[1]=G1
++----+----+   ->  comp[2]=B,  comp[3]=G2
+| G2 | B  |
++----+----+
+\end{lstlisting}
+
+代码中（\texttt{mct.c:413}）：
+
+\begin{lstlisting}[language=C,numbers=none]
+bool mct_bayer_to_4(xs_image_t* im, const xs_cfa_pattern_t cfa_pattern)
+{
+    // 输入: ncomps=1, width=W, height=H
+    // 输出: ncomps=4, width=W/2, height=H/2
+
+    for (int line = 0; line < im->height; ++line)
+        for (int x = 0; x < im->width; ++x)
+        {
+            dst[0] = src[0];       // R  (左上)
+            dst[2] = src[w];       // B  (左下)
+            dst[1] = src[1];       // G1 (右上)
+            dst[3] = src[w + 1];   // G2 (右下)
+            src += 2;
+        }
+}
+\end{lstlisting}
+
+CFA 模式决定了 4 个虚拟分量到原始 Bayer 位置的映射：
+
+\begin{table}[H]
+\centering
+\caption{CFA 模式与分量映射}
+\begin{tabular}{@{}ccccc@{}}
+\toprule
+CFA 模式 & comp[0] & comp[1] & comp[2] & comp[3] \\
+\midrule
+RGGB & R & G1 & B & G2 \\
+BGGR & B & G1 & R & G2 \\
+GRBG & G1 & R & G2 & B \\
+GBRG & G1 & B & G2 & R \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{逆过程 \texttt{mct\_4\_to\_bayer()}}
+
+解码端将 4 分量合并回单分量 Bayer 图像（\texttt{mct.c:468}）。
+
+\section{Star-Tetrix 变换}
+
+\subsection{变换概述}
+
+Star-Tetrix 是专为 Bayer CFA 设计的可逆色彩变换。它包含 \textbf{4 个遍历}（pass），每个遍历处理不同方向的邻域关系：
+
+\begin{engineeringnote}
+以下 4 遍扫描的功能描述（``利用水平/垂直相邻的同色像素''等）是对 \texttt{mct\_forward\_tetrix()} 中 4 个循环体的功能性解释。标准文本（ISO/IEC 21122）定义了每遍的精确数学公式，但未解释为何选择这 4 种特定的邻域方向。``去相关''是基于信号处理原理的推断。
+\end{engineeringnote}
+
+\begin{enumerate}
+  \item \textbf{Pass 1 --- Forward CbCr}：利用水平/垂直相邻的同色像素计算色度残差
+  \item \textbf{Pass 2 --- Forward Y}：利用色度信息预测亮度
+  \item \textbf{Pass 3 --- Forward delta}：利用对角相邻像素计算残差
+  \item \textbf{Pass 4 --- Forward average}：利用对角平均值进一步去相关
+\end{enumerate}
+
+\subsection{\texttt{mct\_tetrix\_access()} --- 像素寻址}
+
+Tetrix 的核心难点是\textbf{跨分量像素寻址}：给定当前坐标 $(x, y)$、分量 $c$、偏移 $(r_x, r_y)$，需要找到对应的像素位置。
+
+代码中（\texttt{mct.c:128}）：
+
+\begin{lstlisting}[language=C,numbers=none]
+xs_data_in_t* mct_tetrix_access(xs_image_t* im, const int c, const int Cf,
+                                 const int Ct, const int rx, const int ry,
+                                 const int x, const int y)
+{
+    int t_x = rx + ((Ct + c) & 1);
+    int t_y = ry + (((~(c)) >> 1) & 1);
+    const int k = ((((~(t_y)) << 1) & 2) | (((Ct) ^ (t_x)) & 1));
+    // ... 边界处理和坐标变换
+    return im->comps_array[k] + t_y * im->width + t_x;
+}
+\end{lstlisting}
+
+参数说明：
+\begin{itemize}
+  \item $C_f$：Full（3）或 Inline（0）模式
+  \item $C_t$：由 CFA 模式决定（RGGB/BGGR=0，GRBG/GBRG=1）
+  \item $c$：目标分量（0--3）
+\end{itemize}
+
+\subsection{Forward CbCr（Pass 1）}
+
+对分量 1 和 2（色度），利用水平相邻的同色像素：
+\begin{equation}
+s_c = s_c - \left\lfloor \frac{s_{c,\mathit{left}} + s_{c,\mathit{right}} + s_{c,\mathit{top}} + s_{c,\mathit{bottom}}}{4} \right\rfloor, \quad c \in \{1, 2\}
+\end{equation}
+
+\subsection{Forward Y（Pass 2）}
+
+对分量 0 和 3（亮度），利用色度信息：
+\begin{align}
+s_0 &= s_0 + \left\lfloor \frac{(s_{0,\mathit{left}} + s_{0,\mathit{right}}) \ll e_2 + (s_{0,\mathit{top}} + s_{0,\mathit{bottom}}) \ll e_1}{8} \right\rfloor \\
+s_3 &= s_3 + \left\lfloor \frac{(s_{3,\mathit{top}} + s_{3,\mathit{bottom}}) \ll e_2 + (s_{3,\mathit{left}} + s_{3,\mathit{right}}) \ll e_1}{8} \right\rfloor
+\end{align}
+
+其中 $e_1, e_2$ 是 CTS marker 中的参数（0--3），控制水平和垂直方向的加权。
+
+\subsection{Forward delta（Pass 3）}
+
+\begin{equation}
+s_3 = s_3 - \left\lfloor \frac{s_{3,TL} + s_{3,TR} + s_{3,BL} + s_{3,BR}}{4} \right\rfloor
+\end{equation}
+
+TL/TR/BL/BR 是对角相邻的同分量像素。
+
+\subsection{Forward average（Pass 4）}
+
+\begin{equation}
+s_0 = s_0 + \left\lfloor \frac{s_{0,TL} + s_{0,TR} + s_{0,BL} + s_{0,BR}}{8} \right\rfloor
+\end{equation}
+
+逆变换按完全相反的顺序执行：Pass 4 $\to$ Pass 3 $\to$ Pass 2 $\to$ Pass 1，每步取反操作。
+
+\subsection{CTS 参数}
+
+CTS marker（0xFF18）定义 Tetrix 参数：
+
+\begin{table}[H]
+\centering
+\caption{CTS 参数}
+\begin{tabular}{@{}cll@{}}
+\toprule
+参数 & 含义 & 取值 \\
+\midrule
+$C_f$ & Full/Inline 模式 & 0 = Inline, 3 = Full \\
+$e_1$ & 水平方向加权移位 & 0--3 \\
+$e_2$ & 垂直方向加权移位 & 0--3 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{DWT 抑制（$S_d$）}
+
+当 $S_d > 0$ 时，最后 $S_d$ 个分量\textbf{不做 DWT}，直接以原始分辨率编码。典型用于 Bayer 路径：$S_d = 1$，最后一个分量（高分辨率亮度）跳过 DWT。
+
+验证规则（\texttt{xs\_config.c:836}）：
+\begin{lstlisting}[language=C,numbers=none]
+if (cfg->p.Sd != 1)
+{
+    fprintf(stderr, "Error: Sd must be 1 for Bayer profiles\n");
+    return false;
+}
+\end{lstlisting}
+
+\section{Profile/Level/Sublevel 约束}
+
+\subsection{Profile 约束表}
+
+Profile 定义了编码工具集和参数范围。下表各列含义：
+
+\begin{itemize}
+  \item \textbf{颜色变换}：NONE=禁止，AUTO=自动选择（RCT 或 NONE），TETRIX=Bayer 专用变换
+  \item \textbf{NLx}：最大水平 DWT 分解层数（0 表示不做 DWT）
+  \item \textbf{Nbpp}：Sublevel FULL 时的最大 bpp（bits per pixel），即该 Profile 允许的最高码率
+  \item \textbf{特殊约束}：每个 Profile 特有的额外限制
+\end{itemize}
+
+\begin{table}[H]
+\centering
+\caption{Profile 约束表}
+\small
+\begin{tabular}{@{}L{2.6cm}L{1.4cm}L{0.8cm}L{0.8cm}L{4.5cm}@{}}
+\toprule
+Profile & 颜色变换 & NLx & Nbpp & 特殊约束 \\
+\midrule
+LIGHT\_422\_10 & NONE & 1 & 20 & 4:2:2, 10-bit \\
+LIGHT\_444\_12 & AUTO & 1 & 36 & 4:4:4, 12-bit \\
+MAIN\_420\_12 & NONE & 1 & 18 & 4:2:0, 12-bit \\
+MAIN\_444\_12 & AUTO & 1 & 36 & 4:4:4, 12-bit \\
+HIGH\_420\_12 & NONE & 2 & 18 & 4:2:0, 12-bit, $NL_x=2$（更多分解层） \\
+HIGH\_444\_12 & AUTO & 2 & 36 & 4:4:4, 12-bit, $NL_x=2$ \\
+LIGHT\_BAYER & TETRIX & 0 & 64 & $S_d=1$（$NL_x=0$，不做 DWT 分解） \\
+MAIN\_BAYER & TETRIX & 1 & 64 & $S_d=1$（最后一个分量跳过 DWT） \\
+HIGH\_BAYER & TETRIX & 2 & 64 & $S_d=1$, $NL_x=2$（更多 DWT 分解层） \\
+MLS\_12 & AUTO & 2 & 48 & $F_q=0$, $B_w=d$（数学无损，逐 bit 精确） \\
+UNRESTRICTED & AUTO & --- & --- & 无任何约束，仅开发调试用 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Level 约束}
+
+Level 定义图像尺寸上限：
+
+\begin{table}[H]
+\centering
+\caption{Level 约束表}
+\small
+\begin{tabular}{@{}lrrrr@{}}
+\toprule
+Level & $W_{\max}$ & $H_{\max}$ & $L_{\max}$（像素） & $R_{s,\max}$（采样率） \\
+\midrule
+1K\_1 & 1280 & 5120 & 2,621,440 & 83,558,400 \\
+2K\_1 & 2048 & 8192 & 4,194,304 & 133,693,440 \\
+4K\_1 & 4096 & 16384 & 8,912,896 & 267,386,880 \\
+8K\_1 & 8192 & 32768 & 35,651,584 & 1,069,547,520 \\
+10K\_1 & 10240 & 40960 & 104,857,600 & 3,342,336,000 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Sublevel 约束}
+
+Sublevel 定义最大码率：
+
+\begin{table}[H]
+\centering
+\caption{Sublevel 约束表}
+\begin{tabular}{@{}lc@{}}
+\toprule
+Sublevel & 最大 bpp \\
+\midrule
+2\_BPP & 2 \\
+3\_BPP & 3 \\
+6\_BPP & 6 \\
+9\_BPP & 9 \\
+12\_BPP & 12 \\
+FULL & Profile 定义的 Nbpp \\
+UNRESTRICTED & 无限制 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{自动选择流程}
+
+\texttt{xs\_config\_resolve\_auto\_values()}（\texttt{xs\_config.c:487}）：
+
+\begin{lstlisting}[numbers=none]
+1. Profile AUTO -> 根据 ncomps 和 subsampling 选择
+2. Level AUTO -> 选择满足 WxH 的最低 Level
+3. Sublevel AUTO -> 根据 target_bpp 选择最低 Sublevel
+4. Bw/Fq -> 根据 Profile 和 NLT 解析
+5. CAP bits -> 根据使用的功能自动设置
+6. Gains/Priorities -> 查 LUT 或计算
+\end{lstlisting}
+
+\subsection{验证逻辑}
+
+\texttt{xs\_config\_validate()} 执行以下检查：
+\begin{itemize}
+  \item 图像尺寸与 Level 匹配
+  \item 码率与 Sublevel 匹配
+  \item 颜色变换与分量格式匹配（RCT 需要 3 分量无下采样）
+  \item NLy 约束：$\max(s_y) - 1 \leq NL_y \leq NL_x$
+  \item $S_d$ 约束：$S_d < N_c$，被抑制的分量不能下采样
+  \item Bayer Profile 必须使用 Tetrix
+\end{itemize}
+
+\section{MLS（数学无损）路径}
+
+MLS Profile（\texttt{XS\_PROFILE\_MLS\_12}）的特点：
+\begin{itemize}
+  \item $F_q = 0$：无小数位，不做右移
+  \item $B_w = \mathit{depth}$：工作位宽等于输入位深
+  \item 禁用 rate control：\texttt{bitstream\_size\_in\_bytes = (size\_t)-1}
+  \item 无 NLT
+\end{itemize}
+
+这确保所有变换都是整数可逆的，编码结果数学上完全等于输入。
+
+\subsection{流程图}
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[
+    node distance=0.8cm,
+    block/.style={rectangle, draw, fill=blue!10, text width=3.2cm, text centered, minimum height=0.8cm, font=\small},
+    decision/.style={diamond, draw, fill=yellow!10, text width=2cm, text centered, aspect=2, font=\small},
+    arrow/.style={-{Stealth[length=2.5mm]}, thick}
+]
+    \node[block] (bayer) {Bayer CFA 图像};
+    \node[block, below=of bayer] (b24) {\texttt{mct\_bayer\_to\_4}\\单分量$\to$4 分量};
+    \node[block, below=of b24] (tetrix) {\texttt{mct\_forward\_tetrix}\\4 遍扫描};
+    \node[block, below=of tetrix] (dwt) {DWT 正变换};
+    \node[block, below=of dwt] (enc) {常规编码管线};
+    \node[block, below=of enc] (stream) {JPEG XS 码流};
+
+    \node[block, right=3cm of bayer] (rgb) {常规 RGB/YUV};
+    \node[block, below=of rgb] (nlt) {NLT 正变换};
+    \node[block, below=of nlt] (mct) {MCT: none/RCT};
+
+    \draw[arrow] (bayer) -- (b24);
+    \draw[arrow] (b24) -- (tetrix);
+    \draw[arrow] (tetrix) -- (dwt);
+    \draw[arrow] (dwt) -- (enc);
+    \draw[arrow] (enc) -- (stream);
+
+    \draw[arrow] (rgb) -- (nlt);
+    \draw[arrow] (nlt) -- (mct);
+    \draw[arrow] (mct.south) -- ++(0,-0.6) -| (dwt.east);
+\end{tikzpicture}
+\caption{Bayer 路径与常规路径的流程图}
+\label{fig:special-paths-flowchart}
+\end{figure}
+
+\section{实现映射}
+
+\begin{implmap}
+\begin{tabular}{@{}L{2.8cm}L{3.3cm}L{5.4cm}L{4.0cm}@{}}
+\toprule
+标准概念 & 入口文件 & 关键函数/结构 & 说明 \\
+\midrule
+Bayer$\to$4 & \btt{mct.c:413} & \btt{mct\_bayer\_to\_4()} & 单分量$\to$4 分量 \\
+4$\to$Bayer & \btt{mct.c:468} & \btt{mct\_4\_to\_bayer()} & 4 分量$\to$单分量 \\
+Tetrix 正变换 & \btt{mct.c:157} & \btt{mct\_forward\_tetrix()} & 4 遍扫描 \\
+Tetrix 逆变换 & \btt{mct.c:246} & \btt{mct\_inverse\_tetrix()} & 逆序 4 遍 \\
+像素寻址 & \btt{mct.c:128} & \btt{mct\_tetrix\_access()} & 跨分量寻址 \\
+Profile 表 & \btt{xs\_config.c:91} & \btt{XS\_PROFILES[]} & 15 个 Profile \\
+Level 表 & \btt{xs\_config.c:113} & \btt{XS\_LEVELS[]} & 10 个 Level \\
+Sublevel 表 & \btt{xs\_config.c:127} & \btt{XS\_SUBLEVELS[]} & 7 个 Sublevel \\
+配置解析 & \btt{xs\_config.c:487} & \btt{xs\_config\_resolve\_auto\_values()} & AUTO 解析 \\
+配置验证 & \btt{xs\_config.c:567} & \btt{xs\_config\_validate()} & 约束检查 \\
+\bottomrule
+\end{tabular}
+\end{implmap}
+
+\section{常见误解}
+
+\begin{misunderstanding}
+\begin{enumerate}
+  \item \textbf{``Bayer 图像直接 DWT''} --- 不是。Bayer 先通过 \texttt{mct\_bayer\_to\_4()} 转换为 4 分量，再做 MCT 和 DWT。
+  \item \textbf{``Star-Tetrix 和 RCT 一样是简单的线性变换''} --- 不一样。Tetrix 是 4 遍扫描，每遍使用不同方向的邻域，且包含跨分量寻址。
+  \item \textbf{``Profile 只影响编码参数''} --- Profile 还约束了可用的编码工具。例如非 Bayer Profile 不允许 NLT，非 UNRESTRICTED Profile 要求 \texttt{slice\_height=16}。
+  \item \textbf{``Level 只约束图像尺寸''} --- Level 还约束了最大采样率 $R_{s,\max}$，限制了帧率。
+\end{enumerate}
+\end{misunderstanding}
+
+\section{本章小结}
+
+JPEG XS 通过 Bayer$\to$4 分量$\to$Tetrix 路径支持 CFA 图像。Star-Tetrix 是 4 遍扫描的可逆色彩变换，利用 Bayer 模式的空间规律去相关。Profile/Level/Sublevel 三层约束体系确保互操作性，自动解析流程简化了用户配置。
+
+下一章将通过一个端到端的编码追踪示例，将所有步骤串联起来。

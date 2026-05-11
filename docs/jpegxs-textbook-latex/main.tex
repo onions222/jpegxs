@@ -1,0 +1,99 @@
+% main.tex — JPEG-XS Textbook (ElegantBook Version)
+% Build: latexmk -xelatex main.tex
+% Engine: xelatex (ElegantBook + CTEX for Chinese support)
+% Class: ElegantBook v4.6 (TeX Live 2026)
+%
+% ElegantBook options:
+%   lang=cn            Chinese localization
+%   color=blue         Blue accent (matches our existing style)
+%   mode=fancy         tcolorbox-based theorem boxes
+%   chinesefont=nofont Let us set CJK fonts manually (STSong etc.)
+%   scheme=chinese     "第一章" chapter numbering
+%   titlestyle=hang    Hanging chapter title style
+
+\documentclass[
+  lang=cn,
+  color=blue,
+  mode=fancy,
+  chinesefont=nofont,
+  scheme=chinese,
+  titlestyle=hang
+]{elegantbook}
+
+\input{preamble}
+
+% ── Title ─────────────────────────────────────────────────────────
+\title{JPEG XS 编码技术教材}
+\subtitle{标准导向 + 实现映射 + 算例册}
+\author{}
+\date{\today}
+\institute{}
+\extrainfo{基于 ISO/IEC 21122 标准与 libjxs 参考实现}
+\cover{figures/cover.png}
+
+% ── Custom Title Page (cover image only, text is in the image) ────
+\makeatletter
+\renewcommand*{\maketitle}{%
+\hypersetup{pageanchor=false}
+\pagenumbering{Alph}
+\begin{titlepage}
+  \newgeometry{margin=0in}
+  \parindent=0pt
+  \thispagestyle{empty}
+  \ifdefined\@cover
+    \includegraphics[width=\paperwidth,height=\paperheight,keepaspectratio]{\@cover}
+  \else
+    \includegraphics[width=\paperwidth]{example-image}
+  \fi
+\end{titlepage}
+\restoregeometry
+\thispagestyle{empty}}
+\makeatother
+% ── End custom title page ─────────────────────────────────────────
+
+\begin{document}
+
+\maketitle
+
+\frontmatter
+\tableofcontents
+
+\mainmatter
+
+% ── Part I: Foundations ──────────────────────────────────────────
+\include{chapters/00-notation}
+\include{chapters/01-overview}
+\include{chapters/02-signal-model}
+\include{chapters/03-configuration}
+
+% ── Part II: Core Encoding Pipeline ─────────────────────────────
+\include{chapters/04-nlt}
+\include{chapters/05-mct}
+\include{chapters/06-dwt}
+\include{chapters/07-bands-precincts}
+\include{chapters/08-gcli}
+\include{chapters/09-rate-control}
+\include{chapters/10-quantization}
+\include{chapters/11-packing}
+
+% ── Part III: Decoder & Special Paths ───────────────────────────
+\include{chapters/12-decoder}
+\include{chapters/13-special-paths}
+\include{chapters/14-end-to-end-trace}
+\include{chapters/15-notes}
+
+% ── Worked Examples ──────────────────────────────────────────────
+\appendix
+\chapter{算例册}
+
+\include{examples/nlt-worked-examples}
+\include{examples/mct-worked-examples}
+\include{examples/dwt-worked-examples}
+\include{examples/precinct-and-band-mapping-examples}
+\include{examples/gcli-gtli-and-budget-examples}
+\include{examples/rate-control-search-examples}
+\include{examples/packing-and-marker-examples}
+
+\include{appendices/notation-table}
+
+\end{document}

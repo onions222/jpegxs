@@ -1,0 +1,131 @@
+JPEG XS 编码器函数调用层次
+================================
+
+main()                                    [programs/xs_enc_main.c]
+  |
+  +-- xs_config_parse_and_init()          [libjxs/src/xs_config_parser.c]
+  |     解析 "-c profile=Main444.12;rate=4" 字符串
+  |
+  +-- image_open()                        [programs/image_open.c]
+  |     读取输入图像文件 (PPM/PGM/PGX 等)
+  |
+  +-- xs_enc_preprocess_image()           [libjxs/src/xs_enc.c:158]
+  |     |
+  |     +-- mct_bayer_to_4()              [libjxs/src/mct.c]
+  |           仅当 color_transform == TETRIX 时调用
+  |
+  +-- xs_enc_init()                       [libjxs/src/xs_enc.c:97]
+  |     |
+  |     +-- xs_config_resolve_auto_values()[libjxs/src/xs_config.c]
+  |     +-- xs_config_validate()          [libjxs/src/xs_config.c]
+  |     +-- ids_construct()               [libjxs/src/ids.c]
+  |     |     计算 precinct 几何: cs, npx, ph, np, pwb 等
+  |     +-- rate_control_open()            [libjxs/src/rate_control.c]
+  |     |     为每个 precinct 列初始化码率控制
+  |     +-- precinct_open_column()         [libjxs/src/precinct.c]
+  |     |     为每个 precinct 列分配系数缓冲区
+  |     +-- packer_open()                 [libjxs/src/packing.c]
+  |     +-- bitpacker_init()              [libjxs/src/bitpacking.c]
+  |
+  +-- xs_enc_image()                      [libjxs/src/xs_enc.c:216]
+        |
+        +-- xs_write_head()              [libjxs/src/xs_markers.c]
+        |     写入 SOC, SIZ, COD, QCD 等标记
+        |
+        +-- _xs_enc_init_column_rates()  [libjxs/src/xs_enc.c:170]
+        |     按列分配码率预算
+        |
+        +-- nlt_forward_transform()      [libjxs/src/nlt.c]
+        |     |
+        |     +-- nlt_forward_linear()   或
+        |     +-- nlt_forward_quadratic() 或
+        |     +-- nlt_forward_extended()
+        |
+        +-- mct_forward_transform()      [libjxs/src/mct.c]
+        |     |
+        |     +-- mct_forward_rct()      或
+        |     +-- mct_forward_tetrix()
+        |
+        +-- dwt_forward_transform()      [libjxs/src/dwt.c]
+        |     |
+        |     +-- [循环每级分解] --+
+        |     +-- dwt_tranform_vertical_()
+        |     |     +-- dwt_forward_filter_1d_()
+        |     +-- dwt_tranform_horizontal_()
+        |           +-- dwt_forward_filter_1d_()
+        |
+        +-- [precinct 循环: line_idx += ph, column++]
+              |
+              +-- precinct_from_image()  [libjxs/src/precinct.c]
+              |     从小波系数缓冲区提取当前 precinct
+              |
+              +-- update_gclis()         [libjxs/src/precinct.c]
+              |     为每组 (N_g=4) 系数计算 GCLI
+              |
+              +-- rate_control_process_precinct() [libjxs/src/rate_control.c]
+              |     |
+              |     +-- compute_gtli_tables()     [libjxs/src/sb_weighting.c]
+              |     +-- precinct_budget_*()        [libjxs/src/precinct_budget.c]
+              |     +-- gcli_budget_*()            [libjxs/src/gcli_budget.c]
+              |     +-- data_budget_*()            [libjxs/src/data_budget.c]
+              |     +-- _do_rate_allocation()
+              |
+              +-- quantize_precinct()    [libjxs/src/quant.c]
+              |     |
+              |     +-- deadzone_dq()    或
+              |     +-- uniform_dq()
+              |
+              +-- [写 slice header] xs_write_slice_header() [libjxs/src/xs_markers.c]
+              |
+              +-- pack_precinct()        [libjxs/src/packing.c]
+                    |
+                    +-- [写入 GCLI subpacket]
+                    +-- [写入 significance flags]
+                    +-- [写入 coefficient data]
+                        +-- [使用 bit_packer_t 按位写入]
+
+        +-- xs_write_tail()              [libjxs/src/xs_markers.c]
+              写入 EOC 标记
+
+
+JPEG XS 解码器函数调用层次 (逆向)
+================================
+
+main()                                    [programs/xs_dec_main.c]
+  |
+  +-- xs_dec_probe()                      [libjxs/src/xs_dec.c:105]
+  |     |
+  |     +-- xs_parse_head()              [libjxs/src/xs_markers.c]
+  |           解析头部标记，填充 xs_config 和 xs_image
+  |
+  +-- xs_config_dump()                    [libjxs/src/xs_config.c]
+  |     (如果 -D 选项指定)
+  |
+  +-- xs_dec_init()                       [libjxs/src/xs_dec.c:122]
+  |     |
+  |     +-- xs_config_validate()
+  |     +-- ids_construct()               [libjxs/src/ids.c]
+  |     +-- precinct_open_column() × 2    [libjxs/src/precinct.c]
+  |     +-- unpacker_open()              [libjxs/src/packing.c]
+  |
+  +-- xs_dec_bitstream()                  [libjxs/src/xs_dec.c:227]
+  |     |
+  |     +-- xs_parse_head()              [libjxs/src/xs_markers.c]
+  |     |
+  |     +-- [precinct 循环 (同编码器)]
+  |     |     |
+  |     |     +-- xs_parse_slice_header()[libjxs/src/xs_markers.c]
+  |     |     +-- unpack_precinct()       [libjxs/src/packing.c]
+  |         |     |   解析 GCLI → 符号 → 数据子包
+  |     |     +-- dequantize_precinct()   [libjxs/src/quant.c]
+  |     |     +-- precinct_to_image()     [libjxs/src/precinct.c]
+  |     |
+  |     +-- dwt_inverse_transform()       [libjxs/src/dwt.c]
+  |     +-- mct_inverse_transform()       [libjxs/src/mct.c]
+  |     +-- nlt_inverse_transform()       [libjxs/src/nlt.c]
+  |     +-- xs_parse_tail()              [libjxs/src/xs_markers.c]
+  |
+  +-- xs_dec_postprocess_image()          [libjxs/src/xs_dec.c:307]
+        |
+        +-- mct_4_to_bayer()              [libjxs/src/mct.c]
+              仅当 color_transform == TETRIX 时调用

@@ -1,0 +1,40 @@
+# macOS
+.DS_Store
+
+# Build outputs
+.build/
+build/
+cmake-build-*/
+
+# Editor / local tooling
+.vscode/
+.claude/
+
+# MATLAB temporary files
+*.asv
+*.m~
+*.mlx.autosave
+*.mat
+*.log
+*.aux
+*.out
+*.toc
+*.fls
+*.fdb_latexmk
+*.synctex.gz
+
+# Generated binaries / archives
+*.o
+*.a
+*.so
+*.dylib
+*.dll
+*.exe
+*.zip
+
+# Data and image assets
+data/
+samples/
+
+# Local verification artifacts
+tmp/

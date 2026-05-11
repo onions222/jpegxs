@@ -1,0 +1,263 @@
+% 12-decoder.tex — 解码器逆向路径与重建
+% Source: chapters/12-decoder-inverse-path-and-reconstruction.md (expanded)
+
+\chapter{解码器逆向路径与重建}\label{ch:decoder}
+
+\section{本章目标}
+
+\begin{itemize}
+  \item 理解解码器的完整处理管线
+  \item 掌握从码流到图像的每一步逆操作
+  \item 理解解码器如何验证码流完整性
+  \item 了解解码器的错误处理策略
+\end{itemize}
+
+\section{背景与标准语义}
+
+解码器是编码器的严格逆过程。每一步编码操作都有对应的逆操作，且执行顺序完全相反：
+
+\begin{lstlisting}[numbers=none]
+编码顺序: NLT→ → MCT→ → DWT→ → precinct→ → quantize→ → pack
+解码顺序: unpack → dequantize → precinct→ → DWT← → MCT← ← NLT←
+\end{lstlisting}
+
+\section{完整解码流程}
+
+\subsection{码流解析阶段}
+
+\begin{lstlisting}[numbers=none]
+xs_dec_bitstream()
+  │
+  ├── xs_parse_head()          // 解析所有 header markers
+  │     ├── SOC (0xFF10)
+  │     ├── [CAP] (0xFF50)
+  │     ├── PIH (0xFF12)       // 图像参数
+  │     ├── CDT (0xFF13)       // 分量表
+  │     ├── WGT (0xFF14)       // 权重表
+  │     ├── [NLT] (0xFF16)
+  │     ├── [CWD] (0xFF17)
+  │     ├── [CTS] (0xFF18)
+  │     ├── [CRG] (0xFF19)
+  │     └── [COM] (0xFF15)
+  │
+  ├── ids_construct()          // 构建内部数据结构
+  │
+  └── for each slice:
+        SLH (0xFF20)           // 解析 slice header
+        for each precinct:
+          └── unpack_precinct() // 解包 precinct
+\end{lstlisting}
+
+\subsection{Precinct 解包}
+
+\texttt{unpack\_precinct()}（\texttt{packing.c:780}）：
+
+\begin{lstlisting}[numbers=none]
+unpack_precinct()
+  │
+  ├── 读取 precinct header:
+  │     ├── Lprc (precinct 长度)
+  │     ├── Q (量化参数)
+  │     ├── R (细化参数)
+  │     └── per-band method signaling
+  │
+  ├── compute_gtli_tables(Q, R, ...)  // 恢复 GTLI 表
+  │
+  └── for each subpacket:
+        ├── 读取 packet header (Dr, Ldata, Lgcli, Lsign)
+        ├── unpack_gclis_significance()  // 解码显著性标志
+        ├── unpack_gclis()               // 解码 GCLI 值
+        ├── unpack_data()                // 解码系数 bitplane
+        └── [unpack_sign()]              // 解码符号（Fs=1 时）
+\end{lstlisting}
+
+\subsection{逆量化}
+
+\begin{lstlisting}[numbers=none]
+dequantize_precinct()
+  for each band, each row:
+    dequant(data, width, gclis, N_g, gtli[band], Qpih)
+\end{lstlisting}
+
+\subsection{逆 Precinct 到图像}
+
+\texttt{precinct\_to\_image()}（\texttt{precinct.c:172}）将 sign-magnitude 系数转换回有符号整数，再左移 $F_q$ 位恢复精度。
+
+\subsection{逆 DWT}
+
+\begin{lstlisting}[numbers=none]
+dwt_inverse_transform()
+  for each component k:
+    // Phase 2 逆: 纯水平（从最深层开始）
+    for d = NLx - 1 downto NLy:
+      inverse_horizontal_1d_dwt()
+    // Phase 1 逆: 垂直+水平
+    for d = NLy - 1 downto 0:
+      inverse_horizontal_1d_dwt()
+      inverse_vertical_1d_dwt()
+\end{lstlisting}
+
+\subsection{逆 MCT}
+
+\begin{lstlisting}[numbers=none]
+mct_inverse_transform()
+  switch (color_transform):
+    case NONE:  // 无操作
+    case RCT:   mct_inverse_rct()
+    case TETRIX: mct_inverse_tetrix()
+\end{lstlisting}
+
+如果是 Bayer：\texttt{mct\_4\_to\_bayer()} 将 4 分量合并回单分量。
+
+RCT 逆变换：$G = Y - \lfloor(C_b + C_r)/4\rfloor$, $R = G + C_r$, $B = G + C_b$。
+
+\subsection{逆 NLT}
+
+\begin{lstlisting}[numbers=none]
+nlt_inverse_transform()
+  switch (Tnlt):
+    case NONE:      nlt_inverse_linear()
+    case QUADRATIC: nlt_inverse_quadratic()
+    case EXTENDED:  nlt_inverse_extended()
+\end{lstlisting}
+
+\subsection{后处理}
+
+\begin{lstlisting}[numbers=none]
+xs_dec_postprocess_image()
+  // 如果是 Tetrix（Bayer），恢复原始 Bayer 尺寸
+\end{lstlisting}
+
+\section{解码器验证}
+
+解码器在多个层次验证码流完整性：
+
+\subsection{Marker 验证}
+
+\begin{itemize}
+  \item 每个 marker 的 ID 必须匹配预期值
+  \item 长度字段必须与内容一致
+  \item PIH 中的参数必须通过 \texttt{xs\_config\_validate()} 的校验
+\end{itemize}
+
+\subsection{Precinct 验证}
+
+\begin{lstlisting}[language=C,numbers=none]
+// GCLI 长度验证
+if (subpkt_len != (info->gcli_len[subpkt] << 3))
+    return -1;
+
+// DATA 长度验证
+if (subpkt_len != (info->data_len[subpkt] << 3))
+    return -1;
+
+// SIGN 长度验证（如果 Fs=1）
+if (subpkt_len != (info->sign_len[subpkt] << 3))
+    return -1;
+\end{lstlisting}
+
+每个 subpacket 的实际解码长度必须与 header 中声明的长度一致。不一致表示码流损坏。
+
+\subsection{EOC 验证}
+
+码流末尾必须有 EOC marker（0xFF11）。
+
+\section{流程图}
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[
+    node distance=0.5cm,
+    block/.style={rectangle, draw, fill=blue!10, text width=3.5cm, text centered, minimum height=0.7cm, font=\small},
+    arrow/.style={-{Stealth[length=2.5mm]}, thick}
+]
+    \node[block] (input) {输入码流};
+    \node[block, below=of input] (parse) {\texttt{xs\_parse\_head}\\解析 marker};
+    \node[block, below=of parse] (ids) {\texttt{ids\_construct}\\重建空间索引};
+    \node[block, below=of ids] (unpack) {逐 slice 逐 precinct\\解包};
+    \node[block, below=of unpack] (deq) {\texttt{dequant}\\反量化};
+    \node[block, below=of deq] (prec) {\texttt{precinct\_to\_image}\\$F_q$ 逆转换};
+    \node[block, below=of prec] (idwt) {\texttt{dwt\_inverse\_transform}\\逆 DWT};
+    \node[block, below=of idwt] (imct) {\texttt{mct\_inverse\_transform}\\逆 MCT};
+    \node[block, below=of imct] (inlt) {\texttt{nlt\_inverse\_transform}\\逆 NLT};
+    \node[block, below=of inlt] (output) {输出图像};
+
+    \draw[arrow] (input) -- (parse);
+    \draw[arrow] (parse) -- (ids);
+    \draw[arrow] (ids) -- (unpack);
+    \draw[arrow] (unpack) -- (deq);
+    \draw[arrow] (deq) -- (prec);
+    \draw[arrow] (prec) -- (idwt);
+    \draw[arrow] (idwt) -- (imct);
+    \draw[arrow] (imct) -- (inlt);
+    \draw[arrow] (inlt) -- (output);
+\end{tikzpicture}
+\caption{解码器处理流程}
+\label{fig:decoder-flowchart}
+\end{figure}
+
+\section{实现映射}
+
+\begin{implmap}
+\begin{tabular}{@{}L{2.8cm}L{3.5cm}L{4.5cm}L{4.5cm}@{}}
+\toprule
+标准概念 & 入口文件 & 关键函数/结构 & 说明 \\
+\midrule
+解码器入口 & \btt{xs\_dec.c:227} & \btt{xs\_dec\_bitstream()} & 解码一帧 \\
+Probe & \btt{xs\_dec.c:105} & \btt{xs\_dec\_probe()} & 解析 header 不解码数据 \\
+Marker 解析 & \btt{xs\_markers.c:673} & \btt{xs\_parse\_head()} & 解析所有 header \\
+Precinct 解包 & \btt{packing.c:780} & \btt{unpack\_precinct()} & 解包一个 precinct \\
+GCLI 解包 & \btt{packing.c:537} & \btt{unpack\_gclis()} & 解码 GCLI \\
+数据解包 & \btt{packing.c:201} & \btt{unpack\_data()} & 解码系数 bitplane \\
+反量化 & \btt{quant.c:157} & \btt{dequant()} & bitplane $\to$ 系数值 \\
+Precinct $\to$ 图像 & \btt{precinct.c:172} & \btt{precinct\_to\_image()} & 系数 $\to$ 图像（含 $F_q$ 逆转换） \\
+逆 DWT & \btt{dwt.c:143} & \btt{dwt\_inverse\_transform()} & 小波逆变换 \\
+逆 MCT & \btt{mct.c:358} & \btt{mct\_inverse\_transform()} & 色彩逆变换 \\
+逆 NLT & \btt{nlt.c:266} & \btt{nlt\_inverse\_transform()} & NLT 逆变换 \\
+\bottomrule
+\end{tabular}
+\end{implmap}
+
+\begin{codefact}
+本章关键结论依据以下函数：
+\begin{itemize}
+  \item \texttt{xs\_dec\_bitstream()} --- \texttt{xs\_dec.c} --- 解码器总入口
+  \item \texttt{xs\_parse\_head()} --- \texttt{xs\_markers.c:673} --- Marker 解析
+  \item \texttt{unpack\_precinct()} --- \texttt{packing.c:780} --- Precinct 解包
+  \item \texttt{dequant()} --- \texttt{quant.c:157} --- 反量化
+  \item \texttt{precinct\_to\_image()} --- \texttt{precinct.c:172} --- 系数到图像（含 $F_q$ 逆转换）
+  \item \texttt{dwt\_inverse\_transform()} --- \texttt{dwt.c:143} --- 逆 DWT
+  \item \texttt{mct\_inverse\_transform()} --- \texttt{mct.c:358} --- 逆 MCT
+\end{itemize}
+\end{codefact}
+
+\section{常见误解}
+
+\begin{misunderstanding}
+\begin{enumerate}
+  \item \textbf{``解码器可以跳过验证''} --- 不建议。虽然可以跳过长度检查来处理轻微损坏的码流，但这可能导致未定义行为。生产代码应始终验证。
+  \item \textbf{``解码器需要和编码器完全相同的配置''} --- 不需要。解码器从码流的 marker 段读取所有配置参数。\texttt{xs\_dec\_probe()} 可以只解析 header 来确定图像尺寸和格式。
+  \item \textbf{``解码器的内存需求与编码器相同''} --- 不一定。解码器不需要 rate control 的预算表，内存需求可能略低。
+  \item \textbf{``逆 DWT 和正 DWT 一定完全匹配''} --- 在整数域内使用 5/3 lifting 时，是的。整数 lifting 的正逆变换在没有量化的情况下是完全可逆的。
+\end{enumerate}
+\end{misunderstanding}
+
+\section{与前后章衔接}
+
+\begin{itemize}
+  \item \textbf{输入}：本章的输入来自第 \ref{ch:packing} 章（打包）输出的 JPEG XS 码流
+  \item \textbf{输出}：解码后的图像数据恢复为 \texttt{xs\_image\_t} 格式，与第 \ref{ch:signal-model} 章定义的信号模型一致
+  \item \textbf{逆序参照}：解码步骤严格逆向第 \ref{ch:overview} 章编码器管线中的各模块（NLT $\to$ MCT $\to$ DWT $\to$ 打包）
+\end{itemize}
+
+\section{本章小结}
+
+解码器是编码器的严格逆过程，通过逐层逆操作（unpack $\to$ dequant $\to$ DWT$\leftarrow$ $\to$ MCT$\leftarrow$ $\to$ NLT$\leftarrow$）从码流恢复图像。码流完整性通过多层验证（marker、subpacket 长度、EOC）保证。
+
+\begin{engineeringnote}
+以下``解码器可以比编码器更简单''是基于代码结构的推断。标准本身不要求解码器更简单，但 libjxs 的实现中解码器确实不包含 \texttt{rate\_control}、\texttt{fill\_gcli\_budget\_table} 等编码端模块。具体省略哪些模块取决于实现选择。
+\end{engineeringnote}
+
+JPEG XS 的设计使得解码器可以比编码器更简单——不需要 rate control、GCLI 方法选择等复杂逻辑。
+
+接下来的章节将讲解特殊路径（Bayer/Tetrix）和端到端编码追踪。

@@ -1,0 +1,208 @@
+% preamble.tex — JPEG-XS Textbook Preamble (ElegantBook Compatible)
+% Engine: xelatex
+%
+% ElegantBook already provides:
+%   amsmath/amssymb/amsfonts, booktabs, graphicx, tikz, tcolorbox[many],
+%   listings, enumitem, caption, fancyhdr, geometry, fontspec, ctex,
+%   hyperref, titlesec, setspace, xcolor, biblatex
+%
+% We ADD only what ElegantBook does not provide, and SET our custom
+% teaching environments and CJK fonts.
+
+% ── CJK Fonts (after ElegantBook/CTEX loads fontspec) ─────────────
+% ElegantBook uses chinesefont=nofont: ctex loads with fontset=none.
+% We set macOS system CJK fonts here.
+\setCJKmainfont{STSong}
+\setCJKsansfont{STHeiti}
+\setCJKmonofont{STFangsong}
+\setmonofont{Menlo}[Scale=0.85]
+\xeCJKsetup{AutoFakeBold=true}
+
+% ── Morandi Color Palette (low saturation, grayish tones) ─────────
+% Override ElegantBook's default saturated colors.
+% These four drive ElegantBook's chapter/section titles, headers,
+% caption labels, theorem boxes, hyperlinks, and TOC.
+\definecolor{structurecolor}{RGB}{120,132,150}   % dusty steel blue
+\definecolor{main}{RGB}{140,152,132}              % muted sage
+\definecolor{second}{RGB}{175,152,132}            % warm beige
+\definecolor{third}{RGB}{148,140,158}             % lavender-gray
+\definecolor{winered}{RGB}{138,108,108}           % muted wine (hyperlinks)
+
+% Dedicated Morandi tones for teaching boxes
+\definecolor{exampleframe}{RGB}{110,125,145}      % dusty blue (examplebox)
+\definecolor{engineerframe}{RGB}{170,148,120}     % warm umber (engineeringnote)
+\definecolor{codefactframe}{RGB}{120,140,118}     % muted sage green (codefact)
+\definecolor{sourcetraceframe}{RGB}{140,135,128}  % warm stone gray (sourcetrace)
+\definecolor{implmapframe}{RGB}{135,128,148}      % muted violet-gray (implmap)
+\definecolor{misunderstandframe}{RGB}{165,128,128} % muted rose (misunderstanding)
+
+% ── Math Extensions ───────────────────────────────────────────────
+\usepackage{mathtools}
+
+% ── Tables ────────────────────────────────────────────────────────
+% booktabs/multirow/array already loaded by ElegantBook; add these:
+\usepackage{longtable}
+\usepackage{tabularx}
+\usepackage{seqsplit}
+\newcolumntype{L}[1]{>{\raggedright\arraybackslash}p{#1}}
+\newcolumntype{C}[1]{>{\centering\arraybackslash}p{#1}}
+\newcolumntype{R}[1]{>{\raggedleft\arraybackslash}p{#1}}
+\newcolumntype{Y}{>{\raggedright\arraybackslash}X}
+% Standard implmap column spec
+\newcolumntype{I}{>{\raggedright\arraybackslash}p{2.0cm}}
+\newcolumntype{J}{>{\raggedright\arraybackslash}p{1.8cm}}
+\newcolumntype{K}{>{\raggedright\arraybackslash}p{3.2cm}}
+% Breakable typewriter for table columns (allows line breaks at any character)
+\newcommand{\btt}[1]{\texttt{\seqsplit{#1}}}
+
+% ── TikZ Extensions ───────────────────────────────────────────────
+\usetikzlibrary{arrows.meta,calc,shapes.geometric,fit,backgrounds}
+
+% ── Code Listings (our style, overrides ElegantBook's basic one) ──
+\definecolor{codegreen}{RGB}{105,130,105}
+\definecolor{codegray}{RGB}{140,140,140}
+\definecolor{codepurple}{RGB}{130,110,140}
+\definecolor{backcolour}{RGB}{248,247,245}
+\definecolor{codeframe}{RGB}{175,172,165}
+
+\lstdefinestyle{codestyle}{
+    backgroundcolor=\color{backcolour},
+    commentstyle=\color{codegreen},
+    keywordstyle=\color{codepurple}\bfseries,
+    numberstyle=\tiny\color{codegray},
+    stringstyle=\color{codegreen},
+    basicstyle=\ttfamily\footnotesize,
+    breakatwhitespace=false,
+    breaklines=true,
+    captionpos=b,
+    keepspaces=true,
+    numbers=left,
+    numbersep=5pt,
+    showspaces=false,
+    showstringspaces=false,
+    showtabs=false,
+    tabsize=2,
+    frame=single,
+    rulecolor=\color{codeframe},
+    xleftmargin=2em,
+    framexleftmargin=1.5em,
+    escapeinside={(*@}{@*)},
+}
+
+\lstset{style=codestyle}
+
+% C language definition
+\lstdefinelanguage{C}{
+    keywords={void,int,long,short,unsigned,char,float,double,
+              if,else,for,while,do,switch,case,break,continue,
+              return,typedef,struct,enum,const,static,inline,
+              assert,true,false,NULL,size_t,ptrdiff_t,
+              uint8_t,uint16_t,uint32_t,uint64_t,
+              int8_t,int16_t,int32_t,int64_t},
+    keywordstyle=\color{codepurple}\bfseries,
+    ndkeywords={},
+    comment=[l]{//},
+    morecomment=[s]{/*}{*/},
+    commentstyle=\color{codegreen},
+    stringstyle=\color{codegreen},
+    morestring=[b]",
+}
+
+% Fix CJK in listings
+\lstset{literate={α}{{$\alpha$}}1 {β}{{$\beta$}}1}
+
+% ── Cross-references ──────────────────────────────────────────────
+% ElegantBook loads hyperref with colorlinks,linkcolor=winered.
+% We add cleveref (NOT loaded by ElegantBook).
+\usepackage[nameinlink]{cleveref}
+
+% ── Custom Teaching Environments (tcolorbox-based) ─────────────────
+% ElegantBook loads tcolorbox[many]; we define our boxes on top.
+% NOTE: do NOT reload \usepackage{tcolorbox} — ElegantBook has it.
+% All boxes use breakable to prevent content clipping at page boundaries.
+
+% Worked Example box — dusty steel blue
+\newtcolorbox{examplebox}[1][]{
+    colback=exampleframe!8,
+    colframe=exampleframe!70,
+    fonttitle=\bfseries,
+    title={Worked Example},
+    breakable,
+    #1
+}
+
+% Engineering Note — warm umber
+\newtcolorbox{engineeringnote}[1][]{
+    colback=engineerframe!10,
+    colframe=engineerframe!75,
+    fonttitle=\bfseries,
+    title={工程解释 / 实现推断},
+    breakable,
+    #1
+}
+
+% Code Source Verification — muted sage
+\newtcolorbox{codefact}[1][]{
+    colback=codefactframe!8,
+    colframe=codefactframe!70,
+    fonttitle=\bfseries,
+    title={代码来源核验},
+    breakable,
+    #1
+}
+
+% Source Trace — warm stone gray
+\newtcolorbox{sourcetrace}[1][]{
+    colback=sourcetraceframe!10,
+    colframe=sourcetraceframe!70,
+    fonttitle=\bfseries,
+    title={与代码位置对应},
+    breakable,
+    #1
+}
+
+% Implementation Mapping — violet-gray
+\newtcolorbox{implmap}[1][]{
+    colback=implmapframe!10,
+    colframe=implmapframe!75,
+    fonttitle=\bfseries,
+    fontupper=\small,
+    title={实现映射},
+    breakable,
+    #1
+}
+
+% Common Misunderstanding — muted rose
+\newtcolorbox{misunderstanding}[1][]{
+    colback=misunderstandframe!8,
+    colframe=misunderstandframe!70,
+    fonttitle=\bfseries,
+    title={常见误解},
+    breakable,
+    #1
+}
+
+% ── Unified TikZ Flowchart Styles ─────────────────────────────────
+\tikzset{
+    flowblock/.style={
+        rectangle, draw=structurecolor!70, fill=structurecolor!10,
+        text width=#1, align=center,
+        minimum height=0.7cm, font=\small,
+        inner sep=4pt
+    },
+    flowblock/.default=3.8cm,
+    flowarrow/.style={-{Stealth[length=2.5mm]}, thick, draw=structurecolor!60},
+    flowdecision/.style={
+        diamond, draw=second!70, fill=second!12,
+        text width=#1, align=center,
+        aspect=2, font=\small, inner sep=2pt
+    },
+    flowdecision/.default=2cm,
+}
+
+% ── Misc ──────────────────────────────────────────────────────────
+\usepackage{float}
+% enumitem already loaded by ElegantBook with its own list styles.
+% We add inline option which ElegantBook doesn't load:
+% (already loaded with shortlabels,inline via ElegantBook)
+% caption already loaded by ElegantBook with labelfont={bf,color=structurecolor}

@@ -1,0 +1,398 @@
+% 10-quantization.tex — 量化、细化与 GTLI 选择
+% Source: chapters/10-quantization-refinement-and-gtli-selection.md (expanded)
+
+\chapter{量化、细化与 GTLI 选择}\label{ch:quantization}
+
+\section{本章目标}
+
+\begin{itemize}
+  \item 理解 JPEG XS 的 bitplane 量化机制
+  \item 掌握 dead-zone 和 uniform 两种量化器的数学定义
+  \item 理解 GTLI（Global Truncation Level Information）的计算和作用
+  \item 掌握量化对 sign-magnitude 系数的具体影响
+\end{itemize}
+
+\section{背景与标准语义}
+
+量化是 JPEG XS 中控制有损程度的关键步骤。它通过截断系数的低位 bitplane 来减少编码量。
+
+JPEG XS 的量化机制基于 \textbf{bitplane 截断}：每个系数由若干 bitplane 组成（从最高位 MSB 到最低位 LSB），GCLI 告诉编码器每个系数组有多少个有效 bitplane，GTLI 告诉编码器哪些 bitplane 被丢弃。
+
+\section{数学定义}
+
+\subsection{GTLI 的含义}
+
+GTLI（Global Truncation Level Information）是一个 per-band 的阈值：
+\begin{itemize}
+  \item 对于系数组 $g$：如果 $\mathit{GCLI}_g \leq \mathit{GTLI}_b$，整个组被置零
+  \item 如果 $\mathit{GCLI}_g > \mathit{GTLI}_b$：保留 bitplane $\mathit{GCLI}_g - 1$ 到 $\mathit{GTLI}_b$（含），丢弃 $\mathit{GTLI}_b - 1$ 到 $0$
+\end{itemize}
+
+\subsubsection{源码摘录：\texttt{compute\_gtli()}}
+
+\begin{lstlisting}[language=C,numbers=none]
+static INLINE int compute_gtli(int scenario, int gain, int add_1bp)
+{
+    int gtli = scenario - gain;
+    if (add_1bp)
+        gtli -= 1;
+    gtli = MAX(gtli, 0);
+    gtli = MIN(gtli, MAX_GCLI);
+    return gtli;
+}
+\end{lstlisting}
+
+等价公式：
+\begin{equation}
+\mathit{GTLI} = \mathrm{clip}(Q - \mathit{gain} - [\mathit{priority} < R],\; 0,\; 15)
+\end{equation}
+
+其中 $Q$（量化参数），$\mathit{gain} = \mathit{lvl\_gains[band]}$（band 增益），$[\mathit{priority} < R]$ 为真时额外截断 1 bitplane。
+
+\subsubsection{源码摘录：\texttt{compute\_gtli\_tables()}}
+
+\begin{lstlisting}[language=C,numbers=none]
+int compute_gtli_tables(int quantization, int refinement, int n_lvls,
+    const uint8_t* sb_gains, const uint8_t* sb_priority,
+    int* gtli_table_data, int* gtli_table_gcli,
+    int* precinct_empty)
+{
+    int lvls_empty = 0;
+    for (int lvl = 0; lvl < n_lvls; lvl++)
+    {
+        gtli_table_data[lvl] = compute_gtli(quantization, sb_gains[lvl],
+            (sb_priorities[lvl] < refinement));
+        gtli_table_gcli[lvl] = gtli_table_data[lvl];  // data 和 gcli 共享 GTLI
+
+        if (gtli_table_data[lvl] == MAX_GCLI)           // = 15
+            lvls_empty++;
+    }
+    *precinct_empty = (lvls_empty == n_lvls);           // 所有 band 都空了？
+    return 0;
+}
+\end{lstlisting}
+
+\begin{engineeringnote}
+\textbf{逐段解释}：
+\begin{itemize}
+  \item 对每个 band (lvl)，调用 \texttt{compute\_gtli(Q, gain[lvl], priority[lvl] < R)} 计算 GTLI。
+  \item \texttt{gtli\_table\_data} 和 \texttt{gtli\_table\_gcli} 初始值相同（后续 GCLI 方法选择可能修改 gcli 版本）。
+  \item \texttt{empty} 标志：当所有 band 的 GTLI = 15 时为 true，表示所有 bitplane 都被截断，编码量达到理论最小值。
+\end{itemize}
+\end{engineeringnote}
+
+\subsection{量化器类型}
+
+$Q_{pih}$ 控制量化器类型：
+\begin{itemize}
+  \item $Q_{pih} = 0$：\textbf{Dead-zone} 量化——幅度右移 $\mathrm{GTLI}$ 位实现截断。逆量化时非零值以区间中点重建，而零值直接重建为 0（不做中点偏置）。因此零区间的最大重建误差（$2^{\mathrm{GTLI}}$）是非零区间（$2^{\mathrm{GTLI}-1}$）的两倍，形成一个"死区"效应。实现最简单。
+  \item $Q_{pih} = 1$：\textbf{Uniform} 量化——使用更精细的舍入公式，在 $\mathrm{GCLI}-\mathrm{GTLI}+1$ 个重建级别之间均匀分布，每级重建误差更小。计算量略高于 dead-zone。
+\end{itemize}
+
+\subsection{Dead-Zone 量化（$Q_{pih} = 0$）}
+
+Dead-zone 量化是最简单的 bitplane 截断：
+\begin{equation}
+\mathit{dq}_{\mathit{deadzone}}(v, \mathit{GCLI}, \mathit{GTLI}) =
+\begin{cases}
+0 & \text{if } \mathit{GCLI} \leq \mathit{GTLI} \\
+(v \;\&\; \sim\texttt{SIGN\_BIT\_MASK}) \gg \mathit{GTLI} & \text{otherwise}
+\end{cases}
+\end{equation}
+
+\subsubsection{源码摘录：\texttt{deadzone\_dq()}}
+
+\begin{lstlisting}[language=C,numbers=none]
+int deadzone_dq(int sig_mag_value, int gcli, int gtli)
+{
+    int dq_out = (sig_mag_value & ~SIGN_BIT_MASK) >> gtli;
+    if (dq_out)
+        dq_out |= (sig_mag_value & SIGN_BIT_MASK);
+    return dq_out;
+}
+\end{lstlisting}
+
+逆量化：
+\begin{equation}
+v_{\mathit{rec}} = \begin{cases}
+\mathit{dq} \;|\; (1 \ll (\mathit{GTLI} - 1)) & \text{if } \mathit{GTLI} > 0 \text{ and } \mathit{dq} \neq 0 \\
+\mathit{dq} & \text{otherwise}
+\end{cases}
+\end{equation}
+
+在被截断的最高 bitplane 位置放入 1（midpoint reconstruction）。
+
+\subsubsection{源码摘录：\texttt{deadzone\_dq\_inverse()}}
+
+\begin{lstlisting}[language=C,numbers=none]
+int deadzone_dq_inverse(int dq_value, int gcli, int gtli)
+{
+    int rec = (dq_value & ~SIGN_BIT_MASK) << gtli;
+    if (gtli > 0 && (dq_value & ~SIGN_BIT_MASK))
+        rec |= (1 << (gtli - 1));
+    if (dq_value & SIGN_BIT_MASK)
+        rec |= SIGN_BIT_MASK;
+    return rec;
+}
+\end{lstlisting}
+
+\subsection{Uniform 量化（$Q_{pih} = 1$）}
+
+Uniform 量化使用更精细的重建值：
+
+\begin{equation}
+\zeta = \mathit{GCLI} - \mathit{GTLI} + 1
+\end{equation}
+
+\begin{equation}
+\mathit{dq}_{\mathit{uniform}}(v, \mathit{GCLI}, \mathit{GTLI}) =
+\begin{cases}
+0 & \text{if } \mathit{GCLI} \leq \mathit{GTLI} \\
+\lfloor (d \cdot 2^\zeta - d + 2^{\mathit{GCLI}}) / 2^{\mathit{GCLI}+1} \rfloor & \text{otherwise}
+\end{cases}
+\end{equation}
+
+其中 $d = v \;\&\; \sim\texttt{SIGN\_BIT\_MASK}$（幅度部分）。
+
+\subsubsection{源码摘录：\texttt{uniform\_dq()}}
+
+\begin{lstlisting}[language=C,numbers=none]
+int uniform_dq(int sig_mag_value, int gcli, int gtli)
+{
+    uint32_t dq_out = 0;
+    if (gcli > gtli)
+    {
+        int zeta = gcli - gtli + 1;
+        int d = sig_mag_value & ~SIGN_BIT_MASK;
+        dq_out = ((d << zeta) - d + (1 << gcli)) >> (gcli + 1);
+        if (dq_out)
+            dq_out |= (sig_mag_value & SIGN_BIT_MASK);
+    }
+    return dq_out;
+}
+\end{lstlisting}
+
+\subsection{整体量化流程}
+
+\subsubsection{源码摘录：\texttt{quant()}}
+
+\begin{lstlisting}[language=C,numbers=none]
+int quant(sig_mag_data_t* buf, int buf_len, gcli_data_t* gclis,
+          int group_size, int gtli, int dq_type)
+{
+    int idx = 0;
+    for (int group = 0; group < (buf_len + group_size - 1) / group_size; group++)
+    {
+        const int gcli = gclis[group];
+        if (gcli <= gtli)                                         // (1) 整组清零
+        {
+            memset(&buf[idx], 0, sizeof(sig_mag_data_t) * group_size);
+        }
+        else
+        {
+            if (gtli > 0)                                         // (2) 需要截断
+            {
+                for (int i = 0; i < group_size; i++)
+                {
+                    const int sign = (SIGN_BIT_MASK & buf[idx + i]);
+                    buf[idx + i] = (~SIGN_BIT_MASK) &
+                        apply_dq(dq_type, buf[idx + i], gcli, gtli);  // (3) DQ 截断
+                    buf[idx + i] = buf[idx + i] << gtli;              // (4) 左移回位
+                    buf[idx + i] |= sign;                              // (5) 恢复符号
+                }
+            }
+            // gtli == 0 时不做任何操作（保留原始值）
+        }
+        idx += group_size;
+    }
+    return 0;
+}
+\end{lstlisting}
+
+\begin{engineeringnote}
+\textbf{逐段解释}：
+\begin{itemize}
+  \item \textbf{(1)} 当 $\texttt{gcli} \leq \texttt{gtli}$ 时，该组所有系数的有效位数不超过截断阈值，整组置零。
+  \item \textbf{(2)} $\texttt{gtli} > 0$ 时才需要实际截断。$\texttt{gtli} == 0$ 意味着保留所有 bitplane，无需操作。
+  \item \textbf{(3)} \texttt{apply\_dq()} 应用 dead-zone 或 uniform DQ，将系数幅度右移 gtli 位。
+  \item \textbf{(4)} 左移 gtli 位，将截断后的值恢复到原始 bitplane 位置（方便后续打包直接使用）。
+  \item \textbf{(5)} 恢复符号位。
+\end{itemize}
+\end{engineeringnote}
+
+\subsubsection{源码摘录：\texttt{dequant()}}
+
+\begin{lstlisting}[language=C,numbers=none]
+int dequant(sig_mag_data_t* buf, int buf_len, gcli_data_t* gclis,
+            int group_size, int gtli, int dq_type)
+{
+    int idx = 0;
+    for (int group = 0; group < (buf_len + group_size - 1) / group_size; group++)
+    {
+        const int gcli = gclis[group];
+        if (gcli > gtli)
+        {
+            if (gtli > 0)
+            {
+                for (int i = 0; i < group_size; i++)
+                    buf[idx + i] = apply_dq_inverse(dq_type, buf[idx + i], gcli, gtli);
+            }
+        }
+        idx += group_size;
+    }
+    return 0;
+}
+\end{lstlisting}
+
+解码端不需要左移（码流中的值已经是截断后的表示），直接调用 \texttt{apply\_dq\_inverse()} 恢复重建值。
+
+\subsection{细化参数 $R$}
+
+$R$（refinement）控制优先级截断：
+\begin{itemize}
+  \item $R = 0$：不做额外截断
+  \item $R > 0$：所有 $\mathit{priority} < R$ 的 band 额外截断 1 个 bitplane
+\end{itemize}
+
+$Q$ 是粗调（所有 band 同时截断），$R$ 是细调（按优先级逐步截断）。
+
+\section{处理流程}
+
+\subsection{编码端}
+
+\begin{lstlisting}[numbers=none]
+1. rate_control 确定 Q, R
+2. compute_gtli_tables(Q, R, ...) → gtli_table_data[], gtli_table_gcli[]
+3. quantize_precinct(prec, gtli_table_data, Qpih)
+   for each band, each row:
+       quant(data, width, gclis, N_g, gtli[band], Qpih)
+4. pack_precinct()  // 打包量化后的数据
+\end{lstlisting}
+
+\subsection{解码端}
+
+\begin{lstlisting}[numbers=none]
+1. unpack_precinct() → 得到 gtli_table_data[]
+2. dequantize_precinct(prec, gtli_table_data, Qpih)
+   for each band, each row:
+       dequant(data, width, gclis, N_g, gtli[band], Qpih)
+\end{lstlisting}
+
+\section{算例}
+
+\begin{examplebox}[title={Dead-Zone 量化示例}]
+
+\textbf{输入}：系数 $v = 47$（sign-magnitude，幅度 47，符号正），$\mathrm{GCLI} = 6$（$47 = \texttt{0b101111}$，需要 6 bit），$\mathrm{GTLI} = 3$。
+
+\medskip
+\textbf{Step 1}：幅度右移 $\mathrm{GTLI} = 3$ 位：
+
+$\mathit{dq} = 47 \gg 3 = 5$（$\texttt{0b0101}$）
+
+\textbf{Step 2}：符号位保留。$\mathit{dq}$ 非零，所以 $\mathit{dq} = 5 \,|\, 0 = 5$。
+
+\textbf{Step 3}（逆量化）：$\mathrm{GTLI} > 0$ 且 $\mathit{dq} \neq 0$，所以在 bitplane 2 位置放入 1：
+
+$v_{\mathit{rec}} = (5 \ll 3) \,|\, (1 \ll 2) = 40 \,|\, 4 = 44$
+
+原始值 47，重建值 44，误差 3（$= 2^{\mathrm{GTLI}-1} - 1 = 3$，midpoint 偏置）。
+\end{examplebox}
+
+\begin{examplebox}[title={Uniform 量化示例}]
+
+同上输入，$\mathrm{GCLI} = 6, \mathrm{GTLI} = 3$：
+
+\textbf{Step 1}：$\zeta = 6 - 3 + 1 = 4$
+
+\textbf{Step 2}：$d = 47$
+
+$\mathit{dq} = ((47 \ll 4) - 47 + (1 \ll 6)) \gg 7 = (752 - 47 + 64) \gg 7 = 769 \gg 7 = 5$
+
+\textbf{Step 3}：逆量化更精细地重建，误差更小。
+\end{examplebox}
+
+\begin{examplebox}[title={Per-Band GTLI 表计算示例}]
+
+\textbf{输入条件}：4 个 band，gains = $[2, 1, 1, 0]$，priorities = $[0, 1, 2, 3]$。
+
+\medskip
+\textbf{$Q=2, R=1$ 时的 GTLI 计算}：
+
+\begin{tabular}{@{}cccl@{}}
+\toprule
+Band & gain & priority & $\mathrm{GTLI} = \mathrm{clip}(2 - \mathit{gain} - [\mathit{priority} < 1], 0, 15)$ \\
+\midrule
+0 (LL) & 2 & 0 & $\mathrm{clip}(2-2-1, 0) = \mathbf{0}$ \\
+1 (HL) & 1 & 1 & $\mathrm{clip}(2-1-0, 0) = \mathbf{1}$ \\
+2 (LH) & 1 & 2 & $\mathrm{clip}(2-1-0, 0) = \mathbf{1}$ \\
+3 (HH) & 0 & 3 & $\mathrm{clip}(2-0-0, 0) = \mathbf{2}$ \\
+\bottomrule
+\end{tabular}
+
+\medskip
+\textbf{效果分析}：
+\begin{itemize}
+  \item Band 0 (LL)：GTLI = 0，无截断（gain=2 保护了最重要的 LL band）
+  \item Band 1--2 (HL, LH)：GTLI = 1，截断最低 1 个 bitplane
+  \item Band 3 (HH)：GTLI = 2，截断最低 2 个 bitplane（高频细节损失最多）
+\end{itemize}
+
+\textbf{R 的作用}：当 $R=1$ 时，priority $< 1$ 的 band 0 额外截断 1 bitplane。如果 $R=0$，所有 band 的 $\mathrm{GTLI} = \mathrm{clip}(2-\mathit{gain}, 0)$，band 0 的 GTLI = 0（相同），band 1--2 的 GTLI = 1（相同），band 3 的 GTLI = 2（相同）。$R=1$ 在此例中仅影响 band 0（因 priority=0 $<$ 1）。
+
+\textbf{Q 的作用}：如果 Q 从 2 增加到 3，所有 band 的 GTLI 各增加 1：$[1, 2, 2, 3]$，编码量大幅下降。
+\end{examplebox}
+
+\section{实现映射}
+
+\begin{implmap}
+\begin{tabular}{@{}L{2.0cm}L{3.0cm}L{4.0cm}L{4.5cm}@{}}
+\toprule
+标准概念 & 入口文件 & 关键函数/结构 & 说明 \\
+\midrule
+量化总入口 & \btt{quant.c:129} & \btt{quant()} & 逐组应用 DQ \\
+反量化 & \btt{quant.c:157} & \btt{dequant()} & 逐组逆 DQ \\
+Dead-zone DQ & \btt{quant.c:87} & \btt{deadzone\_dq()} & Eq (1) \\
+Dead-zone 逆 & \btt{quant.c:95} & \btt{deadzone\_dq\_inverse()} & Eq (2) \\
+Uniform DQ & \btt{quant.c:62} & \btt{uniform\_dq()} & Eq (4) \\
+Uniform 逆 & \btt{quant.c:76} & \btt{uniform\_dq\_inverse()} & --- \\
+GTLI 表 & \btt{sb\_weighting.c:68} & \btt{compute\_gtli\_tables()} & Q/R $\to$ GTLI 表 \\
+Precinct 量化 & \btt{precinct.c:351} & \btt{quantize\_precinct()} & 遍历所有 band \\
+\bottomrule
+\end{tabular}
+\end{implmap}
+
+\begin{codefact}
+本章关键结论依据以下函数：
+\begin{itemize}
+  \item \texttt{deadzone\_dq()} --- \texttt{quant.c:87} --- Dead-zone 正向 DQ
+  \item \texttt{deadzone\_dq\_inverse()} --- \texttt{quant.c:95} --- Dead-zone 逆 DQ
+  \item \texttt{uniform\_dq()} --- \texttt{quant.c:62} --- Uniform 正向 DQ
+  \item \texttt{quant()} --- \texttt{quant.c:129} --- 逐组量化入口
+  \item \texttt{dequant()} --- \texttt{quant.c:157} --- 逐组逆量化入口
+  \item \texttt{compute\_gtli\_tables()} --- \texttt{sb\_weighting.c:68} --- GTLI 表计算
+  \item \texttt{quantize\_precinct()} --- \texttt{precinct.c:351} --- Precinct 级量化
+\end{itemize}
+\end{codefact}
+
+\section{常见误解}
+
+\begin{misunderstanding}
+\begin{enumerate}
+  \item \textbf{``GTLI = 0 意味着没有量化''} --- 正确。$\mathrm{GTLI} = 0$ 时，所有 bitplane 都被保留（只要 $\mathrm{GCLI} > 0$）。
+  \item \textbf{``Dead-zone 和 Uniform 的量化结果相同''} --- 编码值可能相同，但逆量化的重建值不同。Uniform 通过线性映射在量化步长内分配更均匀的重建值。
+  \item \textbf{``量化是逐系数的''} --- 不是。量化是\textbf{逐组}（per-group, $N_g = 4$）的，同一组内的 4 个系数使用相同的 GCLI 和 GTLI。
+\end{enumerate}
+\end{misunderstanding}
+
+\section{与前后章衔接}
+
+\begin{itemize}
+  \item \textbf{输入}：本章的输入来自第 \ref{ch:rate-control} 章（码率控制）确定的 GTLI 表和 Q/R 参数
+  \item \textbf{输出}：本章的输出（量化后的系数）传递给第 \ref{ch:packing} 章（打包）组织为码流
+\end{itemize}
+
+\section{本章小结}
+
+JPEG XS 的量化通过 bitplane 截断实现。GTLI 决定每个 band 保留多少 bitplane，dead-zone 和 uniform 两种量化器控制截断后的重建方式。量化是有损的唯一来源——所有其他步骤（NLT, MCT, DWT）在整数域内都是可逆的。
+
+下一章将讲解打包和码流语法——如何将量化后的 GCLI、系数数据和符号位组织成最终的 JPEG XS 码流。

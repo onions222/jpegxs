@@ -1,0 +1,527 @@
+% 07-bands-precincts.tex — 子带、Precinct、Packet 与渐进
+% Source: chapters/07-bands-precincts-packets-and-progression.md (updated)
+
+\chapter{子带、Precinct、Packet 与渐进}\label{ch:bands-precincts}
+
+\section{本章目标}
+
+\begin{itemize}
+  \item 理解子带（band）的形成和索引方式
+  \item 掌握 precinct 的空间划分：列（column）和行
+  \item 理解 packet 的结构：precinct header + GCLI + data + sign
+  \item 了解 IDS（Internal Data Structure）的组织方式
+  \item 理解 JPEG XS 中渐进性的含义
+\end{itemize}
+
+\section{背景与标准语义}
+
+在 DWT 之后，每个分量被分解为多个频率子带。JPEG XS 需要一种方式来组织这些子带数据，以便进行逐块的码率控制和打包。这就是 \textbf{precinct} 和 \textbf{packet} 的作用。
+
+\textbf{核心概念}：
+\begin{itemize}
+  \item \textbf{子带（Band）}：DWT 后的频率分块。一个分量产生多个子带，全部分量的子带合在一起形成 band 列表。
+  \item \textbf{Precinct}：一个子带内的空间矩形区域。图像被划分为 precinct 列（水平）和 precinct 行（垂直）。
+  \item \textbf{Packet}：一个 precinct 的一个子组（subpacket）的编码数据。包含 GCLI 信息、量化系数数据和可选的符号位。
+  \item \textbf{Slice}：一个或多个连续的 precinct 行，形成码流中的 slice 段。
+\end{itemize}
+
+\section{数学定义}
+
+\subsection{子带总数}
+
+对于 $C$ 个分量，每个分量 $c$ 有 $2 \cdot NL_y[c] + NL_x[c] + 1$ 个子带：
+\begin{equation}
+N_{\mathit{bands}} = \sum_{c=0}^{C-1} (2 \cdot NL_y[c] + NL_x[c] + 1)
+\end{equation}
+
+理解这个公式：1 个 LL 子带 + $NL_x[c]$ 个纯水平分解子带（Phase 2）+ $2 \cdot NL_y[c]$ 个 2D 分解子带（Phase 1，每层产生 HL + LH + HH = 3 个，但其中 1 个计入 NLx 的份额），共计 $2 NL_y + NL_x + 1$。
+
+对于典型的 3 分量 RCT 图像（$NL_x = 5, NL_y = 1$）：
+\begin{equation}
+N_{\mathit{bands}} = 3 \times (2 \times 1 + 5 + 1) = 3 \times 8 = 24
+\end{equation}
+
+\subsection{子带尺寸}
+
+子带 $b$ 在分量 $c$ 中的尺寸取决于其下采样指数 $d_x[b], d_y[b]$：
+\begin{equation}
+W_b = \lceil W_c / 2^{d_x[b]} \rceil, \quad H_b = \lceil H_c / 2^{d_y[b]} \rceil
+\end{equation}
+
+其中 $W_c = W / s_x[c]$, $H_c = H / s_y[c]$ 是分量 $c$ 的原始尺寸。
+
+\subsection{Precinct 划分}
+
+图像在水平方向被划分为若干\textbf{列}（column），在垂直方向被划分为若干\textbf{行}（precinct row）。
+
+\subsubsection{列宽}
+
+列宽 $\mathit{cs}$（column stride，以分量 0 的样本为单位）由 $C_w$、$NL_x$ 和最大水平子采样因子 $s_x^{\max}$ 决定：
+\begin{equation}
+\mathit{cs} = \begin{cases} W & \text{if } C_w = 0 \\ 8 \cdot C_w \cdot s_x^{\max} \cdot 2^{NL_x} & \text{if } C_w > 0 \end{cases}
+\end{equation}
+其中 $s_x^{\max} = \max_c(s_x[c])$。在典型 RCT 配置下 $s_x^{\max} = 1$，此时公式简化为 $8 \cdot C_w \cdot 2^{NL_x}$。
+
+列数：$N_{px} = \lceil W / \mathit{cs} \rceil$。
+
+每列的宽度（以像素为单位）：普通列 $pw[0] = \mathit{cs}$，最后一列 $pw[1] = W - (N_{px} - 1) \times \mathit{cs}$。
+
+\subsubsection{Precinct 高度}
+
+一个 precinct 行包含 $2^{NL_y}$ 行全分辨率像素（即 $2^{NL_y}$ 行 LL 子带行）。
+
+Precinct 高度（以分量 0 的像素行为单位）：
+\begin{equation}
+\mathit{ph} = 2^{NL_y}
+\end{equation}
+
+Precinct 行数：$N_{py} = \lceil H / \mathit{ph} \rceil$。
+
+\subsubsection{子带在 precinct 内的宽度}
+
+子带 $b$ 在 precinct 中的宽度（系数个数）：
+\begin{equation}
+\mathit{pw}_b = \lceil \mathit{pw} / 2^{d_x[b]} \rceil
+\end{equation}
+
+\subsubsection{子带在 precinct 内的行数}
+
+每个子带在 precinct 中的行数取决于子带的下采样指数和是否为最后一个 precinct 行：
+\begin{equation}
+H_{\mathit{prec},b} = \begin{cases} 2^{NL_y - d_y[b]} & \text{正常 precinct} \\ \lceil H_b - l_0[b] \rceil & \text{最后一个 precinct} \end{cases}
+\end{equation}
+
+其中 $l_0[b]$ 是该子带的起始行偏移。
+
+\subsection{Packet 与 Subpacket}
+
+每个 precinct 被划分为若干 \textbf{subpacket}。一个 subpacket 是同一个 precinct 内一组相关 band 行的编码单元。
+
+Packet 结构：
+\begin{lstlisting}[numbers=none]
++------------------------------------+
+| Packet Header                       |
+|  - Dr (raw fallback flag, 1 bit)   |
+|  - Ldata (data 长度, N bits)        |
+|  - Lgcli (GCLI 长度, N bits)        |
+|  - Lsign (sign 长度, N bits)        |
++------------------------------------+
+| Significance Flags (可选)           |
++------------------------------------+
+| GCLI Data                           |
+|  (per-band, per-group unary coded) |
++------------------------------------+
+| Coefficient Data                    |
+|  (bitplane-by-bitplane)            |
++------------------------------------+
+| Sign Data (可选, Fs=1 时独立)       |
++------------------------------------+
+\end{lstlisting}
+
+所有段之间以 $N$-bit 对齐（$N = 8$ 对于 header，$N = 4$ 对于 sub-packet 内容）。
+
+\subsection{Precinct Header}
+
+每个 precinct 以一个 header 开头：
+\begin{lstlisting}[numbers=none]
++--------------------------------------+
+| Lprc (precinct 总长度, 16 bits)       |
+| Q   (量化参数, 4 bits)                |
+| R   (细化参数, 4 bits)                |
+| Band method signaling (3 bits/band)  |
++--------------------------------------+
+\end{lstlisting}
+
+\begin{itemize}
+  \item $Q$（quantization）：控制整体量化强度
+  \item $R$（refinement）：控制细化程度
+  \item Band method signaling：每 band 3 bit，编码 GCLI 的预测和 run 方法
+\end{itemize}
+
+\section{IDS（内部数据结构）}
+
+\texttt{ids\_t}（\texttt{ids.h:91}）是连接配置参数与实际处理的核心数据结构。它在编码器初始化时由 \texttt{ids\_construct()} 构建。
+
+\subsection{关键字段}
+
+\begin{table}[H]
+\centering
+\caption{IDS 关键字段}
+\begin{tabular}{@{}ll@{}}
+\toprule
+字段 & 含义 \\
+\midrule
+\texttt{ncomps} & 分量数 \\
+\texttt{comp\_w[c], comp\_h[c]} & 分量 $c$ 的像素尺寸 \\
+\texttt{nbands} & 总子带数 \\
+\texttt{nlxy} & 全局 $NL_x, NL_y$ \\
+\texttt{nlxyp[c]} & 分量 $c$ 的 $NL_x, NL_y$（可能不同） \\
+\texttt{band\_idx[c][b]} & 分量 $c$ 的子带 $b$ 的全局索引 \\
+\texttt{band\_idx\_to\_c\_and\_b[idx]} & 全局索引 $\to$ (分量, 子带) 反查 \\
+\texttt{band\_d[c][b]} & 子带的下采样指数 \\
+\texttt{band\_is\_high[b]} & 是否为高频子带 \\
+\texttt{cs} & 列宽（column stride） \\
+\texttt{npx} & 列数 \\
+\texttt{npy} & precinct 行数 \\
+\texttt{pw[2]} & 普通列和最后一列的宽度 \\
+\texttt{ph} & precinct 高度 \\
+\texttt{pwb[2][band]} & 每个子带在普通/最后列中的宽度 \\
+\texttt{l0[band], l1[2][band]} & 子带行范围 \\
+\texttt{pi[]} & packet 包含顺序（band, y, subpacket） \\
+\texttt{npi} & 一个 precinct 内的总行数 \\
+\texttt{npc} & subpacket 数 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{源码摘录：\texttt{ids\_construct()} 逐段解释}
+
+以下摘录 \texttt{ids\_construct()}（\texttt{ids.c:154}）的关键代码段：
+
+\begin{lstlisting}[language=C,numbers=none]
+void ids_construct(ids_t* ids, const xs_image_t* im,
+    const int ndecomp_h, const int ndecomp_v,
+    const int sd, const int cw, const int lh)
+{
+    // (1) 基本参数
+    ids->nlxy.x = ndecomp_h;
+    ids->nlxy.y = ndecomp_v;
+    ids->nb = 2 * ids->nlxy.y + ids->nlxy.x + 1;
+
+    // (2) Phase 2 高频标记（纯水平分解的 HL 子带）
+    for (int b = 1; b <= ids->nlxy.x - ids->nlxy.y; ++b)
+        ids->band_is_high[b].x = true;
+
+    // (3) Phase 1 高频标记（完整 2D 分解的 HL/LH/HH）
+    for (int b = ids->nlxy.x - ids->nlxy.y + 1; b < ids->nb; b += 3)
+    {
+        ids->band_is_high[b].x = true;      // HL
+        ids->band_is_high[b + 1].y = true;  // LH
+        ids->band_is_high[b + 2].x = true;  // HH (x)
+        ids->band_is_high[b + 2].y = true;  // HH (y)
+    }
+
+    // (4) 每分量的下采样指数 band_d[c][b]
+    // LL 子带（b=0）：最大下采样
+    // Phase 2 bands：水平下采样递减，垂直不变
+    // Phase 1 bands：水平和垂直下采样均为 d
+
+    // (5) 全局 band 索引分配
+    // 先遍历 band(b)，再遍历 component(c)
+
+    // (6) Band 尺寸计算
+    // 高频子带额外除以 2
+
+    // (7) Precinct 参数
+    ids->cs = ids_calculate_cs(im, ndecomp_h, cw);
+    ids->ph = 1 << ids->nlxy.y;
+    ids->npx = (ids->w + ids->cs - 1) / ids->cs;
+    ids->npy = (ids->h + ids->ph - 1) / ids->ph;
+
+    // (8) Packet 包含顺序
+    ids_compute_packet_inclusion_(ids);
+}
+\end{lstlisting}
+
+\begin{engineeringnote}
+\textbf{逐段解释}：
+\begin{itemize}
+  \item \textbf{(1) nb 计算}：$\mathit{nb} = 2 \times NL_y + NL_x + 1$。$NL_x=2, NL_y=1 \to \mathit{nb}=5$。Phase 2 产生 1 个额外 HL，Phase 1 产生 3 个 (HL, LH, HH)，加上 1 个 LL。
+  \item \textbf{(2) Phase 2 高频标记}：$b=1$ 到 $NL_x - NL_y = 1$，标记 \texttt{band\_is\_high[1].x = true}。HL\_2 只在水平方向是高频。
+  \item \textbf{(3) Phase 1 高频标记}：从 $b=NL_x-NL_y+1=2$ 开始，每 3 个一组。$b=2$: HL\_1(高x), $b=3$: LH\_1(高y), $b=4$: HH\_1(高x+高y)。
+  \item \textbf{(4) band\_d 设置}：LL 的 $d$ 最大（最粗）；Phase 2 的 $d$ 递减；Phase 1 的 $d$ 等于分解层级。$d$ 越大，该子带越小。
+  \item \textbf{(5) 全局索引}：每个存在的 band 分配递增的全局 idx，并记录反查映射 \texttt{band\_idx\_to\_c\_and\_b[idx]}。
+  \item \textbf{(6) 尺寸计算}：高频子带额外除以 2（$/ d / 2$），因为高频只占一半位置。公式等价于 $\lceil W_c / 2^{d_x} \rceil$。
+  \item \textbf{(7) Precinct 参数}：$\mathit{ph} = 2^{NL_y}$ 是一个 precinct 行覆盖的 LL 行数；$\mathit{npx} \times \mathit{npy}$ 是总 precinct 数。
+  \item \textbf{(8) 包含顺序}：调用 \texttt{ids\_compute\_packet\_inclusion\_()} 构建 \texttt{pi[]} 数组。
+\end{itemize}
+\end{engineeringnote}
+
+\subsection{源码摘录：\texttt{precinct\_from\_image()}}
+
+\texttt{precinct\_from\_image()}（\texttt{precinct.c:194}）将图像系数转换为 sign-magnitude 表示：
+
+\begin{lstlisting}[language=C,numbers=none]
+void precinct_from_image(precinct_t* prec, xs_image_t* image,
+                          const uint8_t Fq)
+{
+    const sig_mag_data_in_t Fq_r = (1 << Fq) >> 1;  // (1) 舍入偏置
+    for (int band_idx = 0; band_idx < prec->ids->nbands; ++band_idx)
+    {
+        const int height = precinct_in_band_height_of(prec, band_idx);
+        for (int ypos = 0; ypos < height; ++ypos)
+        {
+            // ... 定位 src, dst ...
+            for (size_t i = 0; i < src_len; ++i)
+            {
+                const sig_mag_data_in_t val = *src;
+                if (val >= 0)
+                    *dst++ = (val + Fq_r) >> Fq;    // (2) 正数
+                else
+                    *dst++ = ((-val + Fq_r) >> Fq)   // (3) 负数
+                             | SIGN_BIT_MASK;
+                src += src_inc;                       // (4) 跳到下一系数
+            }
+        }
+    }
+}
+\end{lstlisting}
+
+\begin{engineeringnote}
+\textbf{逐段解释}：
+\begin{itemize}
+  \item \textbf{(1) Fq\_r}：舍入偏置 $= 2^{F_q-1}$。例如 $F_q = 4$ 时 $F_{q,r} = 8$。$(val + 8) \gg 4$ 实现四舍五入。
+  \item \textbf{(2) 正数}：直接加偏置后右移，得到幅度值。
+  \item \textbf{(3) 负数}：先取绝对值（$-val$），加偏置右移，再或上 \texttt{SIGN\_BIT\_MASK}（\texttt{0x80000000}）标记符号。
+  \item \textbf{(4) src\_inc}：由 \texttt{precinct\_ptr\_for\_line\_of\_band()} 返回，等于 $2^{d_x[b]}$，即相邻系数在内存中的间距。
+\end{itemize}
+\end{engineeringnote}
+
+\subsection{源码摘录：\texttt{compute\_gcli\_buf()}}
+
+\begin{lstlisting}[language=C,numbers=none]
+int compute_gcli_buf(const sig_mag_data_t* in, int len,
+                     gcli_data_t* out, int max_out_len,
+                     int* out_len, int group_size)
+{
+    sig_mag_data_t or_all;
+    *out_len = (len + group_size - 1) / group_size;
+
+    for (i = 0; i < (len / group_size) * group_size; i += group_size)
+    {
+        for (or_all = 0, j = 0; j < group_size; j++)
+            or_all |= *in++;                          // (1) OR 聚合
+        *out++ = GCLI(or_all & (~SIGN_BIT_MASK));     // (2) BSR+1
+    }
+    // 尾部不足一组的处理同理...
+}
+\end{lstlisting}
+
+\begin{engineeringnote}
+其中 $\text{BSR}(x) = 31 - \texttt{\_\_builtin\_clz}(x)$（最高有效位位置），$\text{GCLI}(x) = (x{=}{=}0) ? 0 : \text{BSR}(x)+1$。
+\begin{itemize}
+  \item \textbf{(1) OR 聚合}：将组内所有系数（sign-magnitude）按位或。\texttt{\~{}SIGN\_BIT\_MASK} 屏蔽符号位，只保留幅度。
+  \item \textbf{(2) BSR + 1}：OR 结果的最高有效位位置 $+ 1$ = 所有系数共享的位深。例如 OR $= \texttt{0b0111} \to \text{BSR} = 2 \to \text{GCLI} = 3$。
+\end{itemize}
+\end{engineeringnote}
+
+\subsection{Packet 包含顺序}
+
+\texttt{pi[]} 数组定义了一个 precinct 内各 band 行被打包的顺序。每个 \texttt{pi[idx]} 包含：
+\begin{itemize}
+  \item $b$：band 索引
+  \item $y$：该 band 内的行号
+  \item $s$：所属 subpacket
+\end{itemize}
+
+打包顺序按 \texttt{pi[]} 数组的顺序执行，这决定了码流中数据的排列。
+
+\section{处理流程}
+
+\subsection{编码端}
+
+\begin{lstlisting}[numbers=none]
+ids_construct()           // 根据参数构建 IDS
+    |
+    v
+for each precinct row py:
+    for each column px:
+        precinct_from_image()    // 从图像提取系数到 precinct
+        update_gclis()           // 计算每个 group 的 GCLI
+        rate_control...()        // 码率控制（下一章详述）
+        quantize_precinct()      // 量化
+        pack_precinct()          // 打包到码流
+\end{lstlisting}
+
+\subsection{流程图}
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[
+    node distance=0.55cm,
+    block/.style={rectangle, draw, fill=structurecolor!10, draw=structurecolor!60,
+                  text width=5.2cm, align=center, minimum height=0.7cm, font=\small, inner sep=4pt},
+    arrow/.style={-{Stealth[length=2.5mm]}, thick, draw=structurecolor!60}
+]
+    \node[block, fill=blue!10, draw=structurecolor!60] (dwt) {DWT 子带系数};
+    \node[block, below=of dwt] (ids) {\texttt{ids\_construct}：确定 band 数和尺寸};
+    \node[block, below=of ids] (prec) {\texttt{precinct\_from\_image}：$F_q$ 转换为 sign-magnitude};
+    \node[block, fill=green!10, below=of prec] (gcli) {\texttt{update\_gclis}：每 $N_g{=}4$ 个系数为一组计算 GCLI};
+    \node[block, fill=green!10, below=of gcli] (org) {组织为 precinct / packet / subpacket 结构};
+    \node[block, fill=orange!10, below=of org] (out) {输出到码率控制};
+
+    \draw[arrow] (dwt) -- (ids);
+    \draw[arrow] (ids) -- (prec);
+    \draw[arrow] (prec) -- (gcli);
+    \draw[arrow] (gcli) -- (org);
+    \draw[arrow] (org) -- (out);
+\end{tikzpicture}
+\caption{DWT $\to$ Band $\to$ Precinct $\to$ Packet 处理流程}
+\label{fig:precinct-flow}
+\end{figure}
+
+\subsection{DWT $\to$ Band $\to$ Precinct $\to$Packet 全链路关系}
+
+\begin{table}[H]
+\centering
+\small
+\caption{全链路关系}
+\begin{tabular}{@{}L{1.8cm}L{3.0cm}L{3.0cm}L{4.2cm}@{}}
+\toprule
+层次 & 数据结构 & 维度 & 含义 \\
+\midrule
+DWT & \btt{xs\_image\_t.comps\_array[c]} & $W_c{\times}H_c$（一维） & 每分量的子带系数，原地存储 \\
+Band & \btt{ids\_t.band\_idx[c][b]} & 分量 $c{\times}$band $b$ & 子带到全局索引的映射 \\
+Precinct & \btt{precinct\_t} & 列 $px{\times}$行 $py$ & 一个空间矩形区域的所有 band 行 \\
+Position & \btt{ids\_t.pi[idx]} & idx = 0..\btt{npi}{-}1 & precinct 内各 band 行的打包顺序 \\
+Subpacket & \btt{ids\_t.npc} & subpkt=0..\btt{npc}{-}1 & 一组相关 position 的编码单元 \\
+Packet & 码流中的子段 & 每个 subpacket 一个 & packet header+sigf+gcli+data+sign \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{IDS 算例}
+
+\begin{examplebox}[title={Toy Image 的 Band/Precinct/Packet 完整映射}]
+
+\textbf{输入条件}：$W = 16, H = 8$，单分量灰度，8-bit。参数：$NL_x = 2, NL_y = 1, C_w = 0, H_{sl} = 16$。
+
+\medskip
+\textbf{Step 1：Band 数与索引}
+
+$NL_x = 2, NL_y = 1$。$N_b = 2 \cdot NL_y + NL_x + 1 = 2 + 2 + 1 = 5$。
+
+\begin{table}[H]
+\centering
+\small
+\begin{tabular}{@{}cclccc@{}}
+\toprule
+band $b$ & \texttt{high.x} & \texttt{high.y} & 含义 & $d_x$ & $d_y$ \\
+\midrule
+0 & false & false & LL\_2 & 2 & 1 \\
+1 & true & false & HL\_2（Phase 2 水平高频） & 2 & 1 \\
+2 & true & false & HL\_1（Phase 1） & 1 & 1 \\
+3 & false & true & LH\_1（Phase 1） & 1 & 1 \\
+4 & true & true & HH\_1（Phase 1） & 1 & 1 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\textbf{Step 2：Precinct 划分}
+
+$C_w = 0 \to \mathit{cs} = W = 16$，$N_{px} = 1$（整幅图像为一列）。
+
+$\mathit{ph} = 2^{NL_y} = 2$，$N_{py} = \lceil 8/2 \rceil = 4$（4 个 precinct 行）。
+
+\textbf{Step 3：Precinct 内的 band 数据量}
+
+以 precinct 行 0（图像行 0--1）为例：
+
+\begin{table}[H]
+\centering
+\small
+\begin{tabular}{@{}ccccc@{}}
+\toprule
+band & 起始偏移 $l_0$ & 行数 & 宽度（系数） & 总系数 \\
+\midrule
+0 (LL\_2) & 0 & 2 & $\lceil 16/4 \rceil = 4$ & 8 \\
+1 (HL\_2) & 0 & 2 & 4 & 8 \\
+2 (HL\_1) & 0 & 2 & $\lceil 16/2 \rceil = 8$ & 16 \\
+3 (LH\_1) & 1 & 2 & 8 & 16 \\
+4 (HH\_1) & 1 & 2 & 8 & 16 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+整个 precinct 总系数：$8 + 8 + 16 + 16 + 16 = 64$。
+
+\textbf{Step 4：GCLI 组}
+
+以 $N_g = 4$ 为一组：共 16 组。GCLI 编码量（无预测）：$16 \times 4 = 64$ bit。
+
+\textbf{Step 5：Packet 包含顺序（\texttt{pi[]}）}
+
+\begin{table}[H]
+\centering
+\small
+\begin{tabular}{@{}cccl@{}}
+\toprule
+idx & band & 行 $y$ & subpkt $s$ \\
+\midrule
+0 & LL\_2 & 0 & 0 \\
+1 & HL\_2 & 0 & 0 \\
+2 & HL\_1 & 0 & 1 \\
+3 & LH\_1 & 1 & 1 \\
+4 & HH\_1 & 1 & 1 \\
+5 & HL\_1 & 1 & 2 \\
+6 & LH\_1 & 2 & 2 \\
+7 & HH\_1 & 2 & 2 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+$n_{pi} = 8$（position 数），$n_{pc} = 3$（subpacket 数）。
+
+\textbf{数据流汇总}：
+
+\begin{center}
+\small
+\begin{tikzpicture}[
+    node distance=0.5cm,
+    block/.style={rectangle, draw=structurecolor!60, fill=structurecolor!10,
+                  text width=11cm, align=left, minimum height=0.7cm,
+                  font=\small, inner sep=4pt},
+    arrow/.style={-{Stealth[length=2mm]}, thick, draw=structurecolor!60}
+]
+    \node[block] (step1) {原始图像 $16{\times}8$};
+    \node[block, below=of step1] (step2) {DWT ($NL_x{=}2$, $NL_y{=}1$, 先垂直后水平)};
+    \node[block, below=of step2] (step3) {5 个子带：LL\_2($4{\times}4$), HL\_2($4{\times}4$), HL\_1($8{\times}4$), LH\_1($8{\times}4$), HH\_1($8{\times}4$)};
+    \node[block, below=of step3] (step4) {\btt{ids\_construct()}：band 0--4, 全局索引 0--4, 1 列 $\times$ 4 行 = 4 个 precinct};
+    \node[block, below=of step4] (step5) {\btt{precinct\_from\_image()} + \btt{update\_gclis()}：每个 precinct 64 系数, 16 GCLI 组};
+    \node[block, below=of step5] (step6) {\btt{pack\_precinct()}：3 个 subpacket, 按 \btt{pi[]} 顺序编码};
+    \node[block, below=of step6, fill=orange!10] (step7) {码流输出};
+
+    \draw[arrow] (step1) -- (step2);
+    \draw[arrow] (step2) -- (step3);
+    \draw[arrow] (step3) -- (step4);
+    \draw[arrow] (step4) -- (step5);
+    \draw[arrow] (step5) -- (step6);
+    \draw[arrow] (step6) -- (step7);
+\end{tikzpicture}
+\end{center}
+\end{examplebox}
+
+\section{实现映射}
+
+\begin{implmap}
+\begin{tabular}{@{}L{2.0cm}L{3.5cm}L{4.5cm}L{4.5cm}@{}}
+\toprule
+标准概念 & 入口文件 & 关键函数/结构 & 说明 \\
+\midrule
+IDS 构建 & \btt{ids.c:154} & \btt{ids\_construct()} & 从参数派生所有空间索引 \\
+Precinct 打开 & \btt{precinct.c:91} & \btt{precinct\_open\_column()} & 为一列创建 precinct \\
+系数提取 & \btt{precinct.c:194} & \btt{precinct\_from\_image()} & 图像 $\to$ precinct（含 $F_q$ 定点） \\
+GCLI 计算 & \btt{precinct.c:288} & \btt{compute\_gcli\_buf()} & 计算每组的 GCLI \\
+GCLI 更新 & \btt{precinct.c:312} & \btt{update\_gclis()} & 遍历所有 band 行 \\
+Band 数 & \btt{precinct.c:225} & \btt{bands\_count\_of()} & 返回 \btt{ids->nbands} \\
+行数 & \btt{precinct.c:230} & \btt{line\_count\_of()} & 返回 \btt{ids->npi} \\
+\bottomrule
+\end{tabular}
+\end{implmap}
+
+\section{常见误解}
+
+\begin{misunderstanding}
+\begin{enumerate}
+  \item \textbf{``Precinct = Tile''} --- 不一样。JPEG 2000 的 Tile 是完整的图像分块（所有分量、所有子带），而 JPEG XS 的 precinct 是单个子带内的空间区域。
+  \item \textbf{``$C_w = 0$ 表示没有列划分''} --- 正确。$C_w = 0$ 时整幅图像为一个列。但如果图像很宽，这可能超出某些 Profile 的 \texttt{max\_column\_width} 限制。
+  \item \textbf{``所有分量的子带分解相同''} --- 不一定。通过 $S_d$ 可以跳过最后几个分量的 DWT；不同分量由于子采样不同，$NL_x, NL_y$ 也可能不同。
+  \item \textbf{``Packet 和 Precinct 是一对一的''} --- 不一定。一个 precinct 可能包含多个 subpacket（由 \texttt{pi[].s} 索引），每个 subpacket 对应一个独立的 packet 段。
+\end{enumerate}
+\end{misunderstanding}
+
+\section{本章小结}
+
+子带、precinct 和 packet 是 JPEG XS 码流组织的三层结构。DWT 将图像分解为多个频率子带；precinct 将每个子带在空间上划分为矩形区域；packet 将 precinct 的数据按 subpacket 分组编码。IDS（\texttt{ids\_t}）数据结构将配置参数转化为所有空间索引，是连接算法模块的桥梁。
+
+下一章将讲解 GCLI 的计算和预测编码——如何用轻量的方式编码每个系数组的位深信息。

@@ -1,0 +1,288 @@
+% 15-notes.tex — 实现笔记与常见误解
+% Source: chapters/15-implementation-notes-and-common-misunderstandings.md
+
+\chapter{实现笔记与常见误解}\label{ch:notes}
+
+\section{本章目标}
+
+\begin{itemize}
+  \item 总结 libjxs 参考实现的设计要点
+  \item 澄清 JPEG XS 标准的常见误解
+  \item 提供实现建议和调试技巧
+  \item 作为全书的参考总结
+\end{itemize}
+
+\section{实现架构总结}
+
+\subsection{核心数据结构}
+
+libjxs 的关键数据结构及其作用：
+
+\begin{table}[H]
+\centering
+\caption{核心数据结构}
+\begin{tabular}{@{}lll@{}}
+\toprule
+结构 & 文件 & 作用 \\
+\midrule
+\texttt{xs\_config\_t} & \texttt{libjxs.h} & 用户配置：Profile/Level/Sublevel + 编码参数 \\
+\texttt{xs\_config\_parameters\_t} & \texttt{libjxs.h} & 内部参数：NLx/NLy, Cw, Bw, Fq, gains 等 \\
+\texttt{xs\_image\_t} & \texttt{libjxs.h} & 图像数据：comps\_array[], width, height, depth \\
+\texttt{ids\_t} & \texttt{ids.h} & 空间索引：band 映射, precinct 尺寸, packet 顺序 \\
+\texttt{precinct\_t} & \texttt{precinct.h} & Precinct 数据：sig\_mag\_data, gclis \\
+\texttt{precinct\_budget\_table\_t} & \texttt{precinct\_budget\_table.h} & 预算表：每个 subpacket 的编码量 \\
+\texttt{xs\_enc\_context\_t} & \texttt{xs\_enc.c} & 编码器上下文 \\
+\texttt{xs\_dec\_context\_t} & \texttt{xs\_dec.c} & 解码器上下文 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{内存布局}
+
+\texttt{xs\_image\_t} 的分量存储为独立的一维数组：
+
+\begin{lstlisting}[language=C,numbers=none]
+xs_data_in_t* comps_array[MAX_NCOMPS];  // 每个分量独立分配
+int comp_w[MAX_NCOMPS];   // 分量宽度（考虑下采样）
+int comp_h[MAX_NCOMPS];   // 分量高度
+\end{lstlisting}
+
+像素索引：\texttt{comps\_array[c][y * comp\_w[c] + x]}。
+
+\texttt{precinct\_t} 使用 \texttt{multi\_buf\_t} 管理不同 band 行的缓冲区，每个 band 行独立分配，按 \texttt{pi[]} 顺序索引。
+
+\subsection{Sign-Magnitude 表示}
+
+内部使用 \texttt{uint32}（\texttt{sig\_mag\_data\_t}）存储系数，最高位（\texttt{SIGN\_BIT\_MASK = 0x80000000}）为符号位，其余为幅度：
+
+\begin{lstlisting}[language=C,numbers=none]
+正数: val = 幅度
+负数: val = 幅度 | SIGN_BIT_MASK
+零:   val = 0
+\end{lstlisting}
+
+这种表示的好处：OR 运算可以直接合并多个系数的有效位，用于 GCLI 计算。
+
+\section{关键算法总结}
+
+\subsection{编码管线（时间顺序）}
+
+\begin{lstlisting}[numbers=none]
+1. xs_enc_preprocess_image()  -- Bayer -> 4 分量（如果是 Tetrix）
+2. nlt_forward_transform()    -- 非线性亮度变换
+3. mct_forward_transform()    -- 色彩空间变换（RCT/Tetrix）
+4. dwt_forward_transform()    -- 2D 小波变换
+5. [逐 precinct 循环]:
+   5a. precinct_from_image()    -- 提取系数 + Fq 转换
+   5b. update_gclis()           -- 计算 GCLI
+   5c. rate_control_process_precinct() -- Q/R 搜索
+   5d. quantize_precinct()      -- GTLI 截断
+   5e. pack_precinct()          -- 打包到码流
+6. xs_write_tail()             -- 写 EOC
+\end{lstlisting}
+
+\subsection{解码管线}
+
+\begin{lstlisting}[numbers=none]
+1. xs_parse_head()             -- 解析 marker
+2. ids_construct()             -- 构建空间索引
+3. [逐 slice/precinct 循环]:
+   3a. unpack_precinct()        -- 解包 + 恢复 GTLI
+   3b. dequantize_precinct()    -- 逆量化
+4. dwt_inverse_transform()     -- 逆 DWT
+5. mct_inverse_transform()     -- 逆色彩变换
+6. nlt_inverse_transform()     -- 逆 NLT
+\end{lstlisting}
+
+\section{常见误解汇总}
+
+\subsection{概念层面}
+
+\begin{table}[H]
+\centering
+\small
+\caption{概念层面常见误解}
+\begin{tabular}{@{}cL{2.5cm}L{7.5cm}@{}}
+\toprule
+\# & 误解 & 正确理解 \\
+\midrule
+1 & ``JPEG XS 是无损压缩'' & 默认是有损的。MLS Profile 才是数学无损。 \\
+2 & ``JPEG XS 使用算术编码'' & 不使用。GCLI unary 编码 + bitplane 打包是唯一的熵编码。 \\
+3 & ``JPEG XS 类似 JPEG（DCT+量化）'' & 不同。JPEG XS 使用 DWT，且量化基于 bitplane 截断而非除法。 \\
+4 & ``压缩比取决于 Q'' & 取决于 Q 和 R 的组合，以及 band gain/priority 的设置。 \\
+5 & ``每个分量独立编码'' & 在 MCT 之前各分量确实独立处理（NLT 逐分量），但 RCT/Tetrix（MCT 阶段）会混合分量信息——RCT 将 RGB 变换为 YCbCr，分量间不再独立。DWT 仍然是逐分量在空间域内操作，不跨分量。 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{实现层面}
+
+\begin{table}[H]
+\centering
+\small
+\caption{实现层面常见误解}
+\begin{tabular}{@{}cL{4.5cm}L{10.5cm}@{}}
+\toprule
+\# & 误解 & 正确理解 \\
+\midrule
+1 & ``GCLI 是每个系数的位深'' & GCLI 是每组 4 个系数共享的最大位深。 \\
+2 & ``量化是逐系数的'' & 量化是逐组（per-group）的，每组 4 个系数用相同的 GTLI。 \\
+3 & ``Dead-zone 和 Uniform 的编码值不同'' & 编码值可能相同，但逆量化的重建值不同。 \\
+4 & ``NLy 可以大于 NLx'' & 不可以。标准要求 $NL_y \leq NL_x$。 \\
+5 & ``DWT 分解先水平后垂直'' & 实际是先垂直后水平（Phase 1）。 \\
+6 & ``逆 DWT 和正 DWT 不完全匹配'' & 在整数 5/3 lifting 且\textbf{未经量化}的前提下，正逆变换在整数域内完全可逆。如果有量化截断，则逆 DWT 无法恢复被丢弃的 bitplane 信息，整体仍是有损的。 \\
+7 & ``Precinct 和 slice 是同一概念'' & 不同。Slice 是码流组织单位，Precinct 是编码单位。 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{配置层面}
+
+\begin{table}[H]
+\centering
+\small
+\caption{配置层面常见误解}
+\begin{tabular}{@{}cL{4.5cm}L{10.5cm}@{}}
+\toprule
+\# & 误解 & 正确理解 \\
+\midrule
+1 & ``$F_q$ 只影响精度'' & $F_q$ 还影响 DWT 系数的动态范围和工作位宽 $B_w$ 的选择。 \\
+2 & ``Profile AUTO 会选择最佳压缩'' & Profile AUTO 只根据图像格式（ncomps, subsampling）选择匹配的 Profile。 \\
+3 & ``$B_w$ 越大越好'' & $B_w$ 过大会增加内存和计算量，应根据输入位深和 NLT 选择合适的值。 \\
+4 & ``码率控制精确匹配目标'' & 算法尝试匹配，但如果所有 band 已清空仍超预算，\btt{\_do\_rate\_allocation()} 返回 $-1$ 并报错。码流末尾的 padding 用于字节对齐，不是 Q/R 搜索失败后的补救。 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{实现建议}
+
+\subsection{编码器优化}
+
+\begin{enumerate}
+  \item \textbf{GCLI 计算}：使用 SIMD 指令加速 OR 和 BSR 运算
+  \item \textbf{DWT}：行缓存优化，避免整帧存储
+  \item \textbf{码率控制}：缓存预算表，避免重复计算
+  \item \textbf{打包}：预分配足够大的输出缓冲区
+\end{enumerate}
+
+\subsection{解码器优化}
+
+\begin{enumerate}
+  \item \textbf{流水线}：解包和逆量化可以逐 subpacket 执行，无需等待整个 precinct
+  \item \textbf{SIMD}：逆 DWT 和逆 MCT 都适合 SIMD 加速
+  \item \textbf{内存}：解码器不需要预算表和码率控制结构，内存需求更低
+\end{enumerate}
+
+\subsection{调试技巧}
+
+\begin{enumerate}
+  \item \textbf{验证码流}：检查 EOC marker 是否存在，precinct 长度是否一致
+  \item \textbf{对比编解码}：在无损模式（MLS）下，编码$\to$解码应该得到完全相同的图像
+  \item \textbf{逐步验证}：分别验证 NLT、MCT、DWT、量化每一步的正确性
+  \item \textbf{使用 verbose 模式}：\texttt{cfg->verbose > 1} 输出详细的编码统计
+\end{enumerate}
+
+\section{性能特性}
+
+\subsection{计算复杂度}
+
+\begin{table}[H]
+\centering
+\caption{各模块计算复杂度}
+\begin{tabular}{@{}lll@{}}
+\toprule
+模块 & 复杂度 & 瓶颈 \\
+\midrule
+NLT & $O(WH)$ & \texttt{sqrt\_approx\_fixpoint()} \\
+MCT (RCT) & $O(WH)$ & 简单算术 \\
+MCT (Tetrix) & $O(4WH)$ & 4 遍扫描 \\
+DWT & $O(WH \cdot NL)$ & 逐行 lifting \\
+GCLI & $O(WH / N_g)$ & OR + BSR \\
+码率控制 & $O(N_{\mathit{bands}} \cdot Q_{\max})$ & 预算表计算 \\
+打包 & $O(WH)$ & Bit 操作 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{内存需求}
+
+编码器：
+\begin{itemize}
+  \item 图像缓冲区：$W \times H \times N_c \times \texttt{sizeof(data\_in\_t)}$
+  \item Precinct 缓冲区：$N_{\mathit{columns}} \times N_{\mathit{bands}} \times P_w \times P_h \times 4$ bytes
+  \item 预算表：$N_{\mathit{subpkts}} \times 4 \times \texttt{sizeof(int)}$
+\end{itemize}
+
+解码器：不需要预算表和码率控制结构，内存约为编码器的 60--70\%。
+
+\subsection{流程图}
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[
+    node distance=0.7cm and 0.8cm,
+    block/.style={rectangle, draw=structurecolor!60, fill=structurecolor!10,
+                  text width=2.8cm, align=center, minimum height=0.7cm, font=\small, inner sep=4pt},
+    arrow/.style={-{Stealth[length=2.5mm]}, thick, draw=structurecolor!60}
+]
+    % Row 1: Transforms
+    \node[block] (nlt) {NLT:\\\texttt{sqrt\_approx\_fixpoint}};
+    \node[block, right=of nlt] (mct) {MCT:\\RCT / Tetrix};
+    \node[block, right=of mct] (dwt) {DWT:\\5/3 lifting};
+
+    % Row 2: Sign-magnitude
+    \node[block, below=1cm of mct] (sm) {sign-magnitude 表示};
+
+    % Row 3: GCLI, RC, Unary
+    \node[block, below=0.7cm of sm] (unary) {unary 编码};
+
+    % Row 2-3: GCLI/RC
+    \node[block, below=0.7cm of nlt] (gcli) {GCLI:\\OR + BSR};
+    \node[block, right=of gcli] (rc) {Rate Control:\\预算表};
+
+    % Row 4: Packing, Stream
+    \node[block, right=of unary] (pack) {Packing:\\bitpacker};
+    \node[block, below=0.7cm of unary] (stream) {JPEG XS 码流};
+
+    % Arrows: Transforms → Sign-magnitude
+    \draw[arrow] (nlt.south) |- (sm.west);
+    \draw[arrow] (mct) -- (sm);
+    \draw[arrow] (dwt.south) |- (sm.east);
+
+    % Arrows: Sign-magnitude → Unary
+    \draw[arrow] (sm) -- (unary);
+
+    % Arrows: GCLI/RC → Unary
+    \draw[arrow] (gcli) -- (unary);
+    \draw[arrow] (rc) -- (unary);
+
+    % Arrows: Unary and Pack → Stream
+    \draw[arrow] (unary) -- (stream);
+    \draw[arrow] (pack) -- (stream);
+\end{tikzpicture}
+\caption{JPEG XS 实现模块关系}
+\label{fig:notes-architecture}
+\end{figure}
+
+\section{标准兼容性检查表}
+
+实现 JPEG XS 编解码器时，应验证以下关键点：
+
+\begin{itemize}
+  \item[\checkmark] Sign-magnitude 表示正确（零没有符号位）
+  \item[\checkmark] DWT 使用整数 5/3 lifting，边界对称扩展
+  \item[\checkmark] GCLI 计算使用 OR（不是 max）
+  \item[\checkmark] Unary 编码使用 4-clipped signed alphabet
+  \item[\checkmark] Precinct/Packet header 对齐到 8 bit；subpacket 内容（sigf/gcli/data/sign）对齐到 4 bit
+  \item[\checkmark] Precinct 长度与 header 声明一致
+  \item[\checkmark] EOC marker 存在于码流末尾
+  \item[\checkmark] 逆 DWT 执行顺序：Phase 2 逆 $\to$ Phase 1 逆
+  \item[\checkmark] $NL_y \leq NL_x$ 约束满足
+  \item[\checkmark] Marker 长度字段正确
+\end{itemize}
+
+\section{本章小结}
+
+本章总结了 JPEG XS 参考实现的设计要点和常见误解。JPEG XS 的设计哲学是在极低延迟下实现合理的压缩比，通过轻量的熵编码（GCLI）、整数可逆变换（DWT、MCT）和前向码率控制实现这一目标。
+
+理解这些设计选择背后的动机，有助于正确实现和优化 JPEG XS 编解码器。

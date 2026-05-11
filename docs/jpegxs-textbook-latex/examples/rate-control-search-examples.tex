@@ -1,0 +1,110 @@
+% rate-control-search-examples.tex — 码率控制搜索算例
+% Source: examples/rate-control-search-examples.md
+
+\section{码率控制搜索算例}\label{sec:rc-examples}
+
+对应章节：\cref{ch:rate-control}
+
+\subsection{例 1：从 Precinct 数据推导预算表}
+
+\begin{examplebox}[title={RC Worked Example 1：从 Precinct 数据推导预算表}]
+
+\textbf{输入条件}：一个 precinct 包含 4 个 band 行，给定每行的 GCLI 和系数值。
+
+\textbf{已知参数}：
+
+\begin{tabular}{@{}ll@{}}
+\toprule
+参数 & 值 \\
+\midrule
+$N_g$ & 4 \\
+Fs & 0（联合符号） \\
+GCLI 方法 & 无 run，无预测 \\
+\bottomrule
+\end{tabular}
+
+\begin{tabular}{@{}llll@{}}
+\toprule
+Position & Band & GCLI 组值（每组 4 系数） & 系数（幅度） \\
+\midrule
+0 & LL & $[4, 3]$ & $[8, 5, 12, 3], [7, 2, 6, 1]$ \\
+1 & HL & $[2, 1]$ & $[3, 1, 2, 0], [1, 0, 0, 1]$ \\
+2 & LH & $[3, 2]$ & $[5, 7, 3, 4], [2, 1, 3, 0]$ \\
+3 & HH & $[1, 0]$ & $[1, 0, 0, 0], [0, 0, 0, 0]$ \\
+\bottomrule
+\end{tabular}
+
+\textbf{Step 1：GCLI 预算}
+
+无预测，直接编码每个 GCLI 值，$4 \text{ bit} \times \text{组数}$。
+
+\begin{lstlisting}[numbers=none]
+Position 0: 2 groups × 4 bit = 8 bit
+Position 1: 2 groups × 4 bit = 8 bit
+Position 2: 2 groups × 4 bit = 8 bit
+Position 3: 2 groups × 4 bit = 8 bit
+\end{lstlisting}
+
+写入 PBT：\texttt{pbt[position][gtli].gcli = 8}（对所有 gtli 值，GCLI 编码量不变）。
+
+\textbf{Step 2：数据预算}
+
+对每个 position，计算每个 gtli 下的 bitplane 编码量。
+
+Fs=0, group\_size=4：$\mathit{n\_bitplanes} = (\mathit{gcli} - \mathit{gtli}) + 1$（+1 是联合符号位），编码量 $= \mathit{n\_bitplanes} \times 4$。
+
+\textbf{Position 0}（GCLI = $[4, 3]$）：
+
+\begin{tabular}{@{}rrrr@{}}
+\toprule
+gtli & Group 0: $(4{-}\mathit{gtli}{+}1){\times}4$ & Group 1: $(3{-}\mathit{gtli}{+}1){\times}4$ & Total \\
+\midrule
+0 & $5 \times 4 = 20$ & $4 \times 4 = 16$ & 36 \\
+1 & $4 \times 4 = 16$ & $3 \times 4 = 12$ & 28 \\
+2 & $3 \times 4 = 12$ & $2 \times 4 = 8$  & 20 \\
+3 & $2 \times 4 = 8$  & $1 \times 4 = 4$  & 12 \\
+4 & $1 \times 4 = 4$  & $0 \times 4 = 0$  & 4  \\
+$5+$ & 0 & 0 & 0 \\
+\bottomrule
+\end{tabular}
+
+\textbf{Position 1}（GCLI = $[2, 1]$）：
+
+\begin{tabular}{@{}rrrr@{}}
+\toprule
+gtli & Group 0 & Group 1 & Total \\
+\midrule
+0 & $3 \times 4 = 12$ & $2 \times 4 = 8$  & 20 \\
+1 & $2 \times 4 = 8$  & $1 \times 4 = 4$  & 12 \\
+2 & $1 \times 4 = 4$  & $0 \times 4 = 0$  & 4  \\
+$3+$ & 0 & 0 & 0 \\
+\bottomrule
+\end{tabular}
+
+\textbf{Position 2}（GCLI = $[3, 2]$）：
+
+\begin{tabular}{@{}rrrr@{}}
+\toprule
+gtli & Group 0 & Group 1 & Total \\
+\midrule
+0 & $4 \times 4 = 16$ & $3 \times 4 = 12$ & 28 \\
+1 & $3 \times 4 = 12$ & $2 \times 4 = 8$  & 20 \\
+2 & $2 \times 4 = 8$  & $1 \times 4 = 4$  & 12 \\
+3 & $1 \times 4 = 4$  & $0 \times 4 = 0$  & 4  \\
+$4+$ & 0 & 0 & 0 \\
+\bottomrule
+\end{tabular}
+
+\textbf{Position 3}（GCLI = $[1, 0]$）：
+
+\begin{tabular}{@{}rrrr@{}}
+\toprule
+gtli & Group 0 & Group 1 & Total \\
+\midrule
+0 & $2 \times 4 = 8$  & $1 \times 4 = 4$ & 12 \\
+1 & $1 \times 4 = 4$  & $0 \times 4 = 0$ & 4  \\
+$2+$ & 0 & 0 & 0 \\
+\bottomrule
+\end{tabular}
+
+\end{examplebox}

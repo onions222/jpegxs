@@ -1,0 +1,106 @@
+% dwt-worked-examples.tex — DWT 算例
+% Source: examples/dwt-worked-examples.md
+
+\section{DWT 算例}\label{sec:dwt-examples}
+
+对应章节：\cref{ch:dwt}
+
+\subsection{例 1：1D 5/3 Lifting 正变换}
+
+\begin{examplebox}[title={DWT Worked Example 1：1D 5/3 Lifting 正变换}]
+
+\textbf{输入条件}：一维信号 8 个样本，验证 5/3 lifting 正变换。
+
+\textbf{已知参数}：
+
+\begin{tabular}{@{}ll@{}}
+\toprule
+参数 & 值 \\
+\midrule
+输入信号 & $[10, 20, 30, 40, 50, 60, 70, 80]$ \\
+样本数 & 8 \\
+inc & 1 \\
+\bottomrule
+\end{tabular}
+
+\textbf{代码执行步骤}：以下逐步对照 \texttt{dwt\_forward\_filter\_1d\_()}（\texttt{dwt.c:88}）的执行。
+
+\textbf{Step 1：奇数样本（高通滤波）}
+
+$p = \texttt{base} + \mathit{inc} = \&x[1]$，步长 $2 \times \mathit{inc} = 2$。
+
+\textit{内部奇数}（$p < \texttt{end} - \mathit{inc}$，即 $p < \&x[7]$）：
+
+\begin{tabular}{@{}rrrrr@{}}
+\toprule
+$p$ 指向 & $*(p-\mathit{inc})$ & $*(p+\mathit{inc})$ & 计算 & 新值 $d[i]$ \\
+\midrule
+$x[1]$ & $x[0]=10$ & $x[2]=30$ & $20 - ((10+30)\gg1) = 20 - 20$ & \textbf{0} \\
+$x[3]$ & $x[2]=30$ & $x[4]=50$ & $40 - ((30+50)\gg1) = 40 - 40$ & \textbf{0} \\
+$x[5]$ & $x[4]=50$ & $x[6]=70$ & $60 - ((50+70)\gg1) = 60 - 60$ & \textbf{0} \\
+\bottomrule
+\end{tabular}
+
+此时 $p = \&x[7]$，$p < \texttt{end}$ 成立，进入边界分支：
+
+\textit{最后一个奇数}：$*p -= *(p - \mathit{inc})$ $\to$ $x[7] = 80 - 70 = \mathbf{10}$
+
+Step 1 后数组：$[10, 0, 30, 0, 50, 0, 70, 10]$
+
+\textbf{Step 2：偶数样本（低通滤波）}
+
+$p = \texttt{base} = \&x[0]$。
+
+\textit{第一个偶数}：$*p += (*(p + \mathit{inc}) + 1) \gg 1$
+\begin{itemize}
+  \item $*(p + \mathit{inc}) = x[1] = \mathbf{0}$（已被 Step 1 修改为 $d[1]$）
+  \item $x[0] = 10 + ((0 + 1) \gg 1) = 10 + 0 = \mathbf{10}$
+\end{itemize}
+
+\textit{内部偶数}（$p < \texttt{end} - \mathit{inc}$）：
+
+\begin{tabular}{@{}rrrrr@{}}
+\toprule
+$p$ 指向 & $*(p-\mathit{inc})$ & $*(p+\mathit{inc})$ & 计算 & 新值 $s[i]$ \\
+\midrule
+$x[2]$ & $x[1]=\mathbf{0}$ & $x[3]=\mathbf{0}$ & $30 + ((0+0+2)\gg2) = 30 + 0$ & \textbf{30} \\
+$x[4]$ & $x[3]=\mathbf{0}$ & $x[5]=\mathbf{0}$ & $50 + ((0+0+2)\gg2) = 50 + 0$ & \textbf{50} \\
+\bottomrule
+\end{tabular}
+
+\textit{最后一个偶数}：$*p += (*(p - \mathit{inc}) + 1) \gg 1$
+\begin{itemize}
+  \item $*(p - \mathit{inc}) = x[5] = \mathbf{0}$
+  \item $x[6] = 70 + ((0 + 1) \gg 1) = 70 + 0 = \mathbf{70}$
+\end{itemize}
+
+\textbf{最终结果}：$[10, 0, 30, 0, 50, 0, 70, 10]$
+\begin{itemize}
+  \item 低频（偶数位置）：$[10, 30, 50, 70]$ — 保留了信号的近似趋势
+  \item 高频（奇数位置）：$[0, 0, 0, 10]$ — 大部分为 0，表示信号是线性递增的
+\end{itemize}
+
+\textbf{中间变量表}：
+
+\begin{tabular}{@{}llrrlr@{}}
+\toprule
+步骤 & 操作 & 索引 & 输入值 & 计算过程 & 结果 \\
+\midrule
+1 & 内部奇数 & 1 & 20 & $20 - (10+30)/2$ & 0 \\
+1 & 内部奇数 & 3 & 40 & $40 - (30+50)/2$ & 0 \\
+1 & 内部奇数 & 5 & 60 & $60 - (50+70)/2$ & 0 \\
+1 & 边界奇数 & 7 & 80 & $80 - 70$ & 10 \\
+2 & 第一个偶数 & 0 & 10 & $10 + (d[1]+1)/2 = 10 + 0$ & 10 \\
+2 & 内部偶数 & 2 & 30 & $30 + (d[1]+d[3]+2)/4 = 30 + 0$ & 30 \\
+2 & 内部偶数 & 4 & 50 & $50 + (d[3]+d[5]+2)/4 = 50 + 0$ & 50 \\
+2 & 边界偶数 & 6 & 70 & $70 + (d[5]+1)/2 = 70 + 0$ & 70 \\
+\bottomrule
+\end{tabular}
+
+\begin{tcolorbox}[colback=yellow!5,colframe=yellow!60!black,title=关键]
+Step 2 的偶数计算使用 Step 1 已修改的 $d[j]$ 值（标注为 \textbf{粗体}），而非原始输入值。
+\end{tcolorbox}
+
+\textbf{与代码位置对应}：本例验证 \texttt{dwt\_forward\_filter\_1d\_()}（\texttt{dwt.c:88}）的计算。
+
+\end{examplebox}

@@ -1,0 +1,464 @@
+% 03-configuration.tex — 码流配置：Profile / Level / 参数
+% Source: chapters/03-codestream-configuration-profiles-levels-and-parameters.md (expanded)
+
+\chapter{码流配置：Profile / Level / 参数}\label{ch:configuration}
+
+\section{本章目标}
+
+\begin{itemize}
+  \item 理解 Profile、Level、Sublevel 三层约束体系
+  \item 掌握关键编码参数（$NL_x$, $NL_y$, $C_w$, $H_{sl}$, $N_g$, $S_s$, $Q_{pih}$ 等）的含义和取值
+  \item 理解参数之间的互相约束关系
+  \item 学会如何根据图像特征选择合适的 Profile 和参数
+\end{itemize}
+
+\section{三层约束体系}
+
+JPEG XS 使用三层约束来保证互操作性——不同厂商的编码器和解码器只要遵循相同的 Profile/Level/Sublevel，就一定能互通。
+
+\begin{center}
+\begin{tikzpicture}[
+    layer/.style={rectangle, draw, minimum width=9cm, minimum height=1.2cm,
+                  align=center, font=\small, inner sep=6pt},
+    lbl/.style={font=\small\bfseries, anchor=east},
+    desc/.style={font=\small, anchor=west, text width=5cm},
+    node distance=0.6cm
+]
+  \node[layer, fill=blue!10]  (profile) {Profile（轮廓）};
+  \node[lbl, left=0.3cm of profile] {第一层};
+  \node[desc, right=0.5cm of profile] {定义``用哪些特性''：NLT、RCT/Tetrix、子采样格式};
+
+  \node[layer, fill=green!10, below=of profile] (level) {Level（级别）};
+  \node[lbl, left=0.3cm of level] {第二层};
+  \node[desc, right=0.5cm of level] {定义``图像最大多大''：$W_{max}$, $H_{max}$, $L_{max}$, $R_{s,max}$};
+
+  \node[layer, fill=orange!10, below=of level] (sublevel) {Sublevel（子级别）};
+  \node[lbl, left=0.3cm of sublevel] {第三层};
+  \node[desc, right=0.5cm of sublevel] {定义``码率最高多高''：最大 bpp};
+\end{tikzpicture}
+\end{center}
+
+\textbf{简单理解}：Profile 选功能，Level 选画面大小，Sublevel 选压缩程度。三层叠加，形成完整的互操作性保证。
+
+\subsection{Profile 表}
+
+Profile 决定了编码器\textbf{可以使用哪些工具}以及\textbf{工具的约束范围}。不同 Profile 家族的差异主要体现在三个方面：(1) 是否强制使用色彩变换及允许哪种色彩变换，(2) 水平 DWT 分解层数 $NL_x$ 的上限，(3) 码率控制预算参数的默认值。所有非 Unrestricted Profile 均将 NLT 固定为不启用（\texttt{XS\_NLT\_NONE}），即当前版本的标准 Profile 均不默认开启非线性变换。
+
+\medskip
+\textbf{Profile 命名规则}：每个 Profile 名称由两部分组成——\textbf{复杂度等级} + \textbf{格式后缀}。五个等级的核心差异仅在 $NL_x$ 上限和 Bw/Fq 默认值：
+
+\begin{center}
+\small
+\begin{tabular}{@{}L{1.4cm}L{2.4cm}L{3.5cm}L{4.0cm}@{}}
+\toprule
+等级 & 示例 & 关键约束 & 适用场景 \\
+\midrule
+LIGHT   & LIGHT\_444\_12 & $NL_x{=}1$, Bw/Fq 固定, 444 子格式允许 RCT & 硬件资源受限的低复杂度解码器 \\
+MAIN    & MAIN\_444\_12  & $NL_x{=}1$, Bw/Fq 固定, 444 子格式允许 RCT & 最通用的广播/专业视频等级 \\
+HIGH    & HIGH\_444\_12  & $NL_x{=}2$, 其余与 MAIN 相同 & 需要更高压缩效率的应用 \\
+MLS     & MLS\_12       & $F_q{=}0$, $B_w{=}d$（位宽=输入位深） & 数学无损，编解码逐 bit 一致 \\
+UNRESTRICTED & -{}-  & 无任何约束，所有参数可自由配置 & 仅开发调试 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+格式后缀的含义（与复杂度等级组合形成完整 Profile 名）：
+
+\begin{center}
+\small
+\begin{tabular}{@{}L{1.8cm}L{3.5cm}L{1.8cm}L{3.5cm}@{}}
+\toprule
+后缀 & 含义 & 后缀 & 含义 \\
+\midrule
+\_422\_10  & 4:2:2 子采样, 10-bit  & \_4444\_12 & 4:4:4:4（含 alpha）, 12-bit \\
+\_444\_12  & 4:4:4 全分辨率, 12-bit & \_SUBLINE  & 子行模式, 极低延迟 \\
+\_420\_12  & 4:2:0 子采样, 12-bit  & \_BAYER    & Bayer CFA 传感器, 需 Tetrix \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+例如 \texttt{MAIN\_422\_10} = 标准复杂度 + 4:2:2 + 10-bit——广播级视频最常见配置。
+
+\medskip
+\textbf{如何阅读此表}：
+\begin{itemize}
+  \item \textbf{hex}：Profile 在码流中的编码值（PIH 的 Ppih 字段）
+  \item \textbf{色彩变换}：``none''= 禁止，``RCT''= 可逆颜色变换，``Tetrix''= Bayer 专用
+  \item \textbf{NLT}：``否''= 禁止非线性变换，``any''= 允许
+  \item \textbf{子采样}：色度分辨率相对于亮度的比例（4:4:4 = 无子采样，4:2:2 = 水平 2:1，4:2:0 = 2$\times$2）
+\end{itemize}
+
+\begin{longtable}{@{}llllll@{}}
+\caption{JPEG XS Profile 表}
+\label{tab:profile-table}\\
+\toprule
+Profile & hex & 色彩变换 & NLT & 子采样 & 典型用途 \\
+\midrule
+\endfirsthead
+\toprule
+Profile & hex & 色彩变换 & NLT & 子采样 & 典型用途 \\
+\midrule
+\endhead
+UNRESTRICTED & 0x0000 & any & any & any & 开发/调试 \\
+LIGHT\_422\_10 & 0x1500 & none & 否 & 4:2:2 & 低复杂度 10-bit \\
+LIGHT\_444\_12 & 0x1a00 & none/RCT & 否 & 4:4:4 & 低复杂度 12-bit \\
+LIGHT\_SUBLINE\_422\_10 & 0x2500 & none & 否 & 4:2:2 & subline 模式 \\
+MAIN\_420\_12 & 0x3240 & none & 否 & 4:2:0 & 通用 12-bit \\
+MAIN\_422\_10 & 0x3540 & none & 否 & 4:2:2 & 通用 10-bit \\
+MAIN\_444\_12 & 0x3a40 & none/RCT & 否 & 4:4:4 & 通用 12-bit \\
+MAIN\_4444\_12 & 0x3e40 & none/RCT & 否 & 4:4:4:4 & 带 alpha \\
+HIGH\_420\_12 & 0x4240 & none & 否 & 4:2:0 & 高质量 12-bit \\
+HIGH\_444\_12 & 0x4a40 & none/RCT & 否 & 4:4:4 & 高质量 12-bit \\
+HIGH\_4444\_12 & 0x4e40 & none/RCT & 否 & 4:4:4:4 & 高质量带 alpha \\
+MLS\_12 & 0x6ec0 & any & 否 & any & 数学无损 \\
+LIGHT\_BAYER & 0x9300 & Tetrix & 否 & Bayer & Bayer 低复杂度 \\
+MAIN\_BAYER & 0xb340 & Tetrix & 否 & Bayer & Bayer 通用 \\
+HIGH\_BAYER & 0xc340 & Tetrix & 否 & Bayer & Bayer 高质量 \\
+\bottomrule
+\end{longtable}
+
+\subsection{Level 表}
+
+Level 限制了图像的\textbf{空间维度}。每一行定义了一组上限，编码器的图像尺寸和帧率不能超过这些上限。
+
+\medskip
+\textbf{Level 命名规则}：名称由两部分组成——\textbf{分辨率等级} + \textbf{吞吐量层级}（后缀 \_1, \_2, \_3）。
+后缀数字越大，允许的 $R_{s,max}$（最大样本速率）越高，即同一分辨率下支持的帧率越高。
+例如 \texttt{4K\_1}、\texttt{4K\_2}、\texttt{4K\_3} 允许相同的图像尺寸（均为 4K），但最大帧率依次翻倍。
+不同后缀的 Level 可能有不同的 $L_{max}$ 上限（如 4K\_1 的 $L_{max} = 8{,}912{,}896$，而 4K\_2/4K\_3 的 $L_{max} = 16{,}777{,}216$），即使 $W_{max}$ 和 $H_{max}$ 相同。
+
+\medskip
+\textbf{hex}：Level 在码流中的编码值（PIH 的 Plev 字段高 8 bit）。例如 \texttt{0x20} 对应 4K\_1。
+
+\medskip
+\textbf{关键变量定义}：
+\begin{itemize}
+  \item $W_{max}$：图像\textbf{最大宽度}（像素）。编码器的 $W$ 必须 $\leq W_{max}$。
+  \item $H_{max}$：图像\textbf{最大高度}（像素）。编码器的 $H$ 必须 $\leq H_{max}$。
+  \item $L_{max}$：图像\textbf{最大样本数}（$W \times H$ 的上限）。即使 $W$ 和 $H$ 各自不超标，乘积也不能超过 $L_{max}$。
+  \item $R_{s,max}$：\textbf{最大样本速率}（样本/秒）。等于 帧率 $\times W \times H$ 的上限。这是 Level 对帧率的间接限制。
+\end{itemize}
+
+\textbf{如何阅读此表}：先确认你的图像尺寸 $(W, H)$，再找满足 $W \leq W_{max}$、$H \leq H_{max}$、$W \times H \leq L_{max}$ 的最低 Level。如果帧率较高，还需检查 帧率 $\times W \times H \leq R_{s,max}$。
+
+\footnotesize
+\setlength{\tabcolsep}{3.5pt}
+\begin{longtable}{@{}L{2.2cm}L{0.9cm}R{1.5cm}R{1.5cm}R{2.2cm}R{2.4cm}@{}}
+\caption{JPEG XS Level 表}
+\label{tab:level-table}\\
+\toprule
+Level & hex & $W_{max}$ & $H_{max}$ & $L_{max}$ & $R_{s,max}$ \\
+\midrule
+\endfirsthead
+\toprule
+Level & hex & $W_{max}$ & $H_{max}$ & $L_{max}$ & $R_{s,max}$ \\
+\midrule
+\endhead
+1K\_1 & 0x04 & 1{,}280 & 5{,}120 & 2{,}621{,}440 & 83{,}558{,}400 \\
+2K\_1 & 0x10 & 2{,}048 & 8{,}192 & 4{,}194{,}304 & 133{,}693{,}440 \\
+4K\_1 & 0x20 & 4{,}096 & 16{,}384 & 8{,}912{,}896 & 267{,}386{,}880 \\
+4K\_2 & 0x24 & 4{,}096 & 16{,}384 & 16{,}777{,}216 & 534{,}773{,}760 \\
+4K\_3 & 0x28 & 4{,}096 & 16{,}384 & 16{,}777{,}216 & 1{,}069{,}547{,}520 \\
+8K\_1 & 0x30 & 8{,}192 & 32{,}768 & 35{,}651{,}584 & 1{,}069{,}547{,}520 \\
+8K\_2 & 0x34 & 8{,}192 & 32{,}768 & 67{,}108{,}864 & 2{,}139{,}095{,}040 \\
+8K\_3 & 0x38 & 8{,}192 & 32{,}768 & 67{,}108{,}864 & 4{,}278{,}190{,}080 \\
+10K\_1 & 0x40 & 10{,}240 & 40{,}960 & 104{,}857{,}600 & 3{,}342{,}336{,}000 \\
+UNRESTRICTED & 0x00 & 65{,}535 & 65{,}535 & $2^{32}{-}1$ & $2^{32}{-}1$ \\
+\bottomrule
+\end{longtable}
+
+\begin{examplebox}[title={Level 选型示例}]
+假设拍摄 4K DCI（4096$\times$2160）@ 60 fps：
+
+\medskip
+\textbf{Step 1 — 检查 $W_{max}$ 和 $H_{max}$}：$W = 4096 \leq 4096$（4K\_1 满足），$H = 2160 \leq 16{,}384$（满足）。
+
+\textbf{Step 2 — 检查 $L_{max}$}：$W \times H = 8{,}847{,}360 \leq 8{,}912{,}896$（4K\_1 的 $L_{max}$）。刚好通过！
+
+\textbf{Step 3 — 检查 $R_{s,max}$}：帧率 $\times W \times H = 60 \times 8{,}847{,}360 = 530{,}841{,}600$。但 4K\_1 的 $R_{s,max} = 267{,}386{,}880$，不够！需要升级到 4K\_2（$R_{s,max} = 534{,}773{,}760$）。
+
+\textbf{结果}：选择 \textbf{4K\_2}。
+\end{examplebox}
+
+\begin{engineeringnote}[title={Level 的四个约束缺一不可}]
+Level 约束同时检查 $W \leq W_{max}$、$H \leq H_{max}$、$W \times H \leq L_{max}$ 和 帧率$\times W \times H \leq R_{s,max}$。例如 4K\_1 的 $W_{max} = 4096$ 但 $L_{max} = 8{,}912{,}896$（约 $4096 \times 2176$），所以 4096$\times$2160 正好满足，但 4096$\times$4096 会超出 $L_{max}$，需要升级到 4K\_2。
+\end{engineeringnote}
+
+\subsection{Sublevel 表}
+
+Sublevel 限制了\textbf{压缩后的比特率}。bpp（bits per pixel）= 码流字节数 $\times 8$ / ($W \times H$)。
+
+\medskip
+\textbf{如何阅读此表}：Sublevel 约束的是输出码率上限。选择满足目标 bpp 的最低 Sublevel。例如，目标 3.5 bpp 时选择 4\_BPP。
+
+\begin{table}[H]
+\centering
+\caption{JPEG XS Sublevel 表}
+\label{tab:sublevel-table}
+\begin{tabular}{@{}llr@{}}
+\toprule
+Sublevel & hex & 最大 bpp \\
+\midrule
+2\_BPP & 0x03 & 2 \\
+3\_BPP & 0x04 & 3 \\
+4\_BPP & 0x06 & 4 \\
+6\_BPP & 0x08 & 6 \\
+9\_BPP & 0x0c & 9 \\
+12\_BPP & 0x10 & 12 \\
+FULL & 0x80 & 由 Profile 决定 \\
+UNRESTRICTED & 0x00 & 无限制 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{misunderstanding}
+\textbf{``Sublevel FULL 就是无限制''} --- 不是。Sublevel FULL 的最大 bpp 由 Profile 内的 \texttt{Nbpp\_at\_sublev\_full} 字段决定，不同 Profile 的 FULL 上限不同。
+\end{misunderstanding}
+
+\section{核心编码参数}
+
+\texttt{xs\_config\_parameters\_t} 结构体包含所有编码参数。以下按功能分组说明。
+
+\subsection{小波分解参数}
+
+这组参数控制 DWT（离散小波变换）的分解结构。
+
+\begin{table}[H]
+\centering
+\begin{tabular}{@{}llp{5.5cm}l@{}}
+\toprule
+参数 & 符号 & 含义（在编码流程中起什么作用） & 典型值 \\
+\midrule
+NLx & $NL_x$ & 水平分解层数。决定水平方向子带数量（$NL_x + 1$ 个） & 1--5 \\
+NLy & $NL_y$ & 垂直分解层数。决定垂直方向子带数量。$NL_y = 0$ 时只有水平分解 & 0--2 \\
+Sd & $S_d$ & DWT 抑制分量数。前 $S_d$ 个分量跳过 DWT，直接传输 & 0 或 1 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{engineeringnote}
+$NL_y$ 的下界取决于子采样格式：$NL_y \geq \max_c(\lceil \log_2 s_y[c] \rceil)$。这是因为 DWT 要求每个子带的行数是 $2^{NL_y}$ 的倍数，而子采样会改变各分量的有效分辨率。
+\end{engineeringnote}
+
+\subsection{Precinct 参数}
+
+Precinct 是码率控制的基本单元。这组参数决定了 precinct 的空间划分。
+
+\begin{table}[H]
+\centering
+\begin{tabular}{@{}llp{5.5cm}l@{}}
+\toprule
+参数 & 符号 & 含义（在编码流程中起什么作用） & 典型值 \\
+\midrule
+Cw & $C_w$ & 列宽（以 8 为单位）。$C_w = 0$ 时整幅图像为一列；$C_w > 0$ 时每列为 $8 \times C_w \times s_x^{max} \times 2^{NL_x}$ 像素 & 0（自动） \\
+slice\_height & $H_{sl}$ & slice 高度（以 precinct 行为单位）。控制 slice 的空间粒度 & 16 \\
+$N_g$ & $N_g$ & GCLI 组大小。每 $N_g$ 个系数编为一组，共享一个 GCLI 值 & 4（固定） \\
+$S_s$ & $S_s$ & 显著性标志步长。影响 sigflag 编码的粒度 & 8（固定） \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+列宽的像素计算（分量 0，$s_x^{\max} = \max_c(s_x[c])$）：
+\begin{equation}
+\mathit{col\_width} = \begin{cases}
+W & \text{if } C_w = 0 \\
+8 \times C_w \times s_x^{\max} \times 2^{NL_x} & \text{if } C_w > 0
+\end{cases}
+\end{equation}
+
+\subsection{量化与精度参数}
+
+这组参数控制从浮点/高精度整数到编码 bitplane 的转换。
+
+\begin{table}[H]
+\centering
+\begin{tabular}{@{}llp{5.5cm}l@{}}
+\toprule
+参数 & 符号 & 含义（在编码流程中起什么作用） & 典型值 \\
+\midrule
+Bw & $B_w$ & 内部工作位宽。编码器内部用 $B_w$ 位有符号整数表示系数 & 18--20 \\
+Fq & $F_q$ & 小数位数。输入整数左移 $F_q$ 位得到内部表示；$F_q = 0$ 表示无小数 & 0, 6, 8 \\
+$B_r$ & $B_r$ & 量化位深。每个 bitplane 量化步长的位数 & 4（固定） \\
+Qpih & $Q_{pih}$ & 量化器类型。0 = dead-zone（零点附近有更大量化区间），1 = uniform（均匀步长） & 0 或 1 \\
+Fs & $F_s$ & 符号处理策略。0 = jointly（符号位嵌入 bitplane 流），1 = separate（独立符号段） & 0 或 1 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{GCLI 编码参数}
+
+这组参数控制 GCLI 编码的行为模式。
+
+\begin{table}[H]
+\centering
+\begin{tabular}{@{}llp{5.5cm}l@{}}
+\toprule
+参数 & 符号 & 含义（在编码流程中起什么作用） & 典型值 \\
+\midrule
+Rl & $R_l$ & raw 模式选择。1 = 所有 GCLI 直接编码（不使用预测） & 0 或 1 \\
+Rm & $R_m$ & run 模式。0 = ZRF（零预测残差跳过），1 = ZC（零系数跳过） & 0 或 1 \\
+Lh & $L_h$ & 强制长 precinct header。1 = 使用更长的 header 以支持更多 band & 0 或 1 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{颜色变换参数}
+
+这组参数控制编码前的颜色空间变换。
+
+\begin{table}[H]
+\centering
+\begin{tabular}{@{}llp{5.5cm}l@{}}
+\toprule
+参数 & 符号 & 含义（在编码流程中起什么作用） & 值 \\
+\midrule
+color\_transform & $C_{pih}$ & 颜色变换类型 & NONE(0), RCT(1), TETRIX(3) \\
+Cf & $C_f$ & Tetrix 滤波器模式 & FULL(0), INLINE(3) \\
+$e_1, e_2$ & $e_1, e_2$ & Tetrix 加权参数 & 0--3 \\
+cfa\_pattern & --- & Bayer CFA 模式 & RGGB, BGGR, GRBG, GBRG \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{参数约束关系}
+
+编码参数之间存在复杂的约束关系。以下列出主要约束：
+
+\subsection{主要约束}
+
+\begin{align}
+NL_y &\leq NL_x \leq N_{decomp\_h,max} = 5 \label{eq:nl-constraint}\\
+NL_y &\geq \max_c(\lceil \log_2 s_y[c] \rceil) \label{eq:nly-bound}\\
+H_{sl} &\equiv 0 \pmod{2^{NL_y}} \label{eq:hsl-mod}\\
+S_d &< C \label{eq:sd-constraint}
+\end{align}
+
+使用 RCT 时：$C \geq 3$ 且 $s_x[c] = s_y[c] = 1$（$c = 0, 1, 2$）。
+
+使用 Tetrix 时：$C = 4$ 且 $s_x[c] = s_y[c] = 1$（所有 $c$）。
+
+\subsection{Profile 特有的约束}
+
+非 Unrestricted Profile 额外要求：
+\begin{itemize}
+  \item $H_{sl} = 16$（固定）
+  \item $L_h = 0$
+  \item $N_g = 4$, $S_s = 8$, $B_r = 4$（固定）
+\end{itemize}
+
+Main/High Profile（$NL_y > 0$ 时）：$C_w = 0$。
+
+MLS Profile：$B_w = d$（= 输入位深），$F_q = 0$。
+
+\section{自动解析流程}
+
+当参数设为 \texttt{AUTO}（\texttt{0xff}）时，\texttt{xs\_config\_resolve\_auto\_values()}（\texttt{xs\_config.c:487}）按以下顺序解析：
+
+\begin{enumerate}
+  \item \textbf{color\_transform}：根据 profile 和分量格式选择
+  \item \textbf{level}：选择满足图像尺寸的最低 level
+  \item \textbf{sublevel}：根据实际 bpp 选择最低 sublevel
+  \item \textbf{Bw, Fq}：根据 profile 和 NLT 类型解析
+  \item \textbf{cap\_bits}：根据实际使用的特性自动设置
+  \item \textbf{gains, priorities}：查找内置权重表
+\end{enumerate}
+
+\section{编码器初始化流程}
+
+\begin{lstlisting}[numbers=none]
+xs_enc_init()
+  ├── xs_config_resolve_auto_values()   // 解析 AUTO 值
+  ├── xs_config_validate()              // 校验参数合法性
+  ├── ids_construct()                   // 构建内部数据结构
+  ├── for each column:
+  │     ├── rate_control_open()         // 打开码率控制
+  │     └── precinct_open_column()      // 打开 precinct
+  └── packer_open()                     // 打开打包器
+\end{lstlisting}
+
+\texttt{ids\_construct()}（\texttt{ids.c}）根据 $NL_x$, $NL_y$, $C$, $s_x$, $s_y$, $C_w$, $H_{sl}$ 等参数，计算出所有子带的尺寸、precinct 的行列数、每个子带在 precinct 内的行数等。这是\textbf{参数到实际处理的桥梁}。
+
+\subsection{流程图}
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[
+    node distance=0.5cm,
+    block/.style={flowblock=4.5cm},
+    decision/.style={flowdecision=2.5cm},
+    arrow/.style={flowarrow}
+]
+    \node[block] (init) {\texttt{xs\_config\_init}};
+    \node[block, below=of init] (resolve) {\texttt{xs\_config\_resolve\_auto\_values}};
+    \node[block, below=of resolve] (profile) {解析 Profile/Level/Sublevel};
+    \node[block, below=of profile] (params) {解析 Bw/Fq/gains};
+    \node[block, below=of params] (validate) {\texttt{xs\_config\_validate}};
+    \node[decision, below=of validate] (check) {约束检查通过?};
+    \node[block, below left=1cm and 1.5cm of check] (error) {报错};
+    \node[block, below right=1cm and 1.5cm of check] (ids) {\texttt{ids\_construct}};
+    \node[block, below=of ids] (ready) {编码器就绪};
+
+    \draw[arrow] (init) -- (resolve);
+    \draw[arrow] (resolve) -- (profile);
+    \draw[arrow] (profile) -- (params);
+    \draw[arrow] (params) -- (validate);
+    \draw[arrow] (validate) -- (check);
+    \draw[arrow] (check) -| node[above left, font=\footnotesize]{否} (error);
+    \draw[arrow] (check) -| node[above right, font=\footnotesize]{是} (ids);
+    \draw[arrow] (ids) -- (ready);
+\end{tikzpicture}
+\caption{编码器初始化与配置解析流程}
+\label{fig:encoder-init-flowchart}
+\end{figure}
+
+\section{实现映射}
+
+\begin{implmap}
+\begin{tabular}{@{}L{1.8cm}L{2.0cm}L{3.4cm}L{4.5cm}@{}}
+\toprule
+标准概念 & 入口文件 & 关键函数/结构 & 说明 \\
+\midrule
+配置结构 & \btt{libjxs.h} & \btt{xs\_config\_t}, \btt{xs\_config\_parameters\_t} & 所有编码参数 \\
+Profile 表 & \btt{xs\_config.c} & \btt{XS\_PROFILES[]} & 15 个 profile 定义 \\
+Level 表 & \btt{xs\_config.c} & \btt{XS\_LEVELS[]} & 10 个 level 定义 \\
+Sublevel 表 & \btt{xs\_config.c} & \btt{XS\_SUBLEVELS[]} & 7 个 sublevel 定义 \\
+AUTO 解析 & \btt{xs\_config.c} & \btt{xs\_config\_resolve\_auto\_values()} & 解析 AUTO 参数 \\
+参数校验 & \btt{xs\_config.c} & \btt{xs\_config\_validate()} & 校验约束条件 \\
+IDS 构建 & \btt{ids.c} & \btt{ids\_construct()} & 从参数派生子带/precinct 信息 \\
+\bottomrule
+\end{tabular}
+\end{implmap}
+
+\begin{codefact}
+本章关键结论依据以下函数：
+\begin{itemize}
+  \item \texttt{xs\_config\_init()} --- \texttt{xs\_config.c} --- 配置初始化
+  \item \texttt{xs\_config\_resolve\_auto\_values()} --- \texttt{xs\_config.c:487} --- AUTO 参数解析
+  \item \texttt{xs\_config\_validate()} --- \texttt{xs\_config.c:567} --- 约束校验
+  \item \texttt{ids\_construct()} --- \texttt{ids.c:154} --- 空间索引构建
+\end{itemize}
+\end{codefact}
+
+\section{常见误解}
+
+\begin{misunderstanding}
+\begin{enumerate}
+  \item \textbf{``Profile 只是配置的一部分''} --- 不止。Profile 决定了哪些功能可用（NLT、Tetrix、子采样格式），是互操作性的基础。
+  \item \textbf{``$C_w = 0$ 意味着没有列划分''} --- 正确。$C_w = 0$ 时整幅图像宽度为一列。但这可能不满足某些 Profile 的 max\_column\_width 约束。
+  \item \textbf{``Level 只限制图像尺寸''} --- Level 还限制最大样本速率 $R_{s,max}$，即帧率 $\times W \times H$ 不能超过该值。
+  \item \textbf{``Sublevel FULL 就是无限制''} --- 不是。Sublevel FULL 的最大 bpp 由 Profile 内的 \texttt{Nbpp\_at\_sublev\_full} 字段决定。
+\end{enumerate}
+\end{misunderstanding}
+
+\section{与前后章衔接}
+
+\begin{itemize}
+  \item \textbf{输入}：本章使用第 \ref{ch:signal-model} 章定义的信号模型参数（$B_w$, $F_q$, 子采样等）
+  \item \textbf{输出}：本章的配置参数传递给第 \ref{ch:nlt} 章（NLT）开始的编码管线
+\end{itemize}
+
+\section{本章小结}
+
+JPEG XS 的配置体系由 Profile/Level/Sublevel 三层约束和数十个编码参数组成。Profile 决定``能用什么''，Level 决定``图像多大''，Sublevel 决定``码率多高''。各参数之间存在明确的约束关系，\texttt{xs\_config\_validate()} 负责校验这些约束。
+
+下一章开始进入编码管线的第一个算法模块：NLT（非线性变换）。

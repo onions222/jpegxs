@@ -1,0 +1,459 @@
+% 06-dwt.tex — DWT（离散小波变换，Discrete Wavelet Transform）
+% Source: chapters/06-dwt-wavelet-transform.md
+
+\chapter{DWT（离散小波变换）}\label{ch:dwt}
+
+\section{本章目标}
+
+\begin{itemize}
+  \item 理解 5/3 Le Gall 小波的 lifting 实现
+  \item 掌握 1D 正变换和逆变换的两步 lifting 过程
+  \item 理解 2D 分解的执行顺序：先垂直后水平
+  \item 掌握 $NL_x$ 和 $NL_y$ 如何控制分解层数
+  \item 理解子带（subband）的命名和排列
+\end{itemize}
+
+\section{背景与标准语义}
+
+DWT（离散小波变换）是 JPEG XS 中唯一引入频率域分析的模块。它将图像分解为低频（近似）和高频（细节）子带，利用自然图像的能量集中在低频的特点来提高压缩效率。
+
+JPEG XS 使用 \textbf{Le Gall 5/3 小波}，基于 \textbf{lifting scheme} 实现。5/3 小波是整数可逆的，滤波器长度为 5（低通）和 3（高通）。
+
+选择 5/3 而非 9/7（JPEG 2000 常用）的原因：
+\begin{itemize}
+  \item 5/3 是整数可逆的，不需要浮点运算
+  \item 计算量更低，适合低延迟硬件实现
+  \item 在目标压缩比（2--6$\times$）下，5/3 和 9/7 的质量差距很小
+\end{itemize}
+
+\section{数学定义}
+
+\subsection{参数}
+
+\begin{table}[H]
+\centering
+\caption{DWT 参数}
+\label{tab:dwt-params}
+\begin{tabular}{@{}llll@{}}
+\toprule
+符号 & 含义 & 代码 & 典型值 \\
+\midrule
+$NL_x$ & 水平分解层数 & \texttt{p.NLx} & 1--5 \\
+$NL_y$ & 垂直分解层数 & \texttt{p.NLy} & 0--2 \\
+$S_d$ & DWT 抑制分量数 & \texttt{p.Sd} & 0 或 1 \\
+$d$ & 当前分解层级索引 & 循环变量 & --- \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\textbf{约束}：$NL_y \leq NL_x \leq 5$，$0 \leq NL_y \leq 2$，$S_d < C$。
+
+\subsection{代码变量对照}
+
+以下是 \texttt{dwt\_forward\_filter\_1d\_()}（\texttt{dwt.c:88}）中使用的变量：
+
+\begin{table}[H]
+\centering
+\caption{DWT 代码变量对照}
+\label{tab:dwt-code-vars}
+\begin{tabular}{@{}llll@{}}
+\toprule
+变量 & 含义 & 1D 水平变换时 & 1D 垂直变换时 \\
+\midrule
+\texttt{base} & 序列起始指针 & 行首地址 & 列首地址 \\
+\texttt{end} & 序列结束指针 & 行尾地址 & 列尾地址 \\
+\texttt{inc} & 步长（相邻样本间距） & $2^{h\_level}$ & $W \times 2^{v\_level}$ \\
+\texttt{p} & 当前遍历指针 & 逐个系数 & 逐个系数 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+在 \texttt{dwt\_transform\_horizontal\_()} 和 \texttt{dwt\_transform\_vertical\_()} 中：
+
+\begin{lstlisting}[language=C,numbers=none]
+// 水平变换 [dwt.c:128]
+x_inc = 1 << h_level;          // 水平步长
+y_inc = comp_w << v_level;     // 垂直步长（行间距）
+// 遍历每行，对每行调用 filter(base, row_end, x_inc)
+
+// 垂直变换 [dwt.c:114]
+x_inc = 1 << h_level;          // 水平步长（列间距）
+y_inc = comp_w << v_level;     // 垂直步长
+// 遍历每列，对每列调用 filter(base, col_end, y_inc)
+\end{lstlisting}
+
+\subsection{1D 5/3 Lifting 正变换}
+
+输入序列 $x[0], x[1], \ldots, x[n-1]$，偶数位置为低通样本，奇数位置为高通样本。
+
+正变换分两步，\textbf{原地（in-place）} 执行。以下公式中，$x[i]$ 表示变换过程中位置 $i$ 的\textbf{当前值}（已被前序步骤修改则取修改后的值）。
+
+\subsubsection{Step 1：奇数样本（高通滤波）}
+
+内部奇数点 $i = 1, 3, 5, \ldots$（需要左右两个邻居）：
+\begin{equation}\label{eq:dwt-fwd-odd}
+d[i] = x[i] - \left\lfloor \frac{x[i-1] + x[i+1]}{2} \right\rfloor
+\end{equation}
+
+此步后，$x[i]$ 更新为 $d[i]$。偶数位置的值不变。
+
+边界奇数点（序列长度为偶数时，最后一个奇数点 $n-1$ 无右邻居，仅用左邻居）：
+\begin{equation}\label{eq:dwt-fwd-odd-boundary}
+d[n-1] = x[n-1] - x[n-2]
+\end{equation}
+
+\subsubsection{Step 2：偶数样本（低通滤波）}
+
+偶数位置的左右邻居此时持有：偶数邻居仍为原始值（Step 1 未修改偶数位置），奇数邻居已被 Step 1 更新为 $d[j]$。
+
+第一个偶数点（右邻居是奇数位置，已被 Step 1 更新）：
+\begin{equation}\label{eq:dwt-fwd-even-first}
+s[0] = x[0] + \left\lfloor \frac{d[1] + 1}{2} \right\rfloor
+\end{equation}
+
+内部偶数点 $i = 2, 4, 6, \ldots$：
+\begin{equation}\label{eq:dwt-fwd-even-internal}
+s[i] = x[i] + \left\lfloor \frac{d[i-1] + d[i+1] + 2}{4} \right\rfloor
+\end{equation}
+
+最后一个偶数点：
+\begin{equation}\label{eq:dwt-fwd-even-last}
+s[n-2] = x[n-2] + \left\lfloor \frac{d[n-1] + 1}{2} \right\rfloor
+\end{equation}
+
+\begin{tcolorbox}[colback=yellow!5,colframe=yellow!60!black,title=注意]
+式 \eqref{eq:dwt-fwd-even-first}\eqref{eq:dwt-fwd-even-last} 中的 $+1$ 和式 \eqref{eq:dwt-fwd-even-internal} 中的 $+2$ 是 rounding 偏置。整数右移 $\gg k$ 等价于 $\lfloor \cdot / 2^k \rfloor$（对非负数），但对负数是向 $-\infty$ 取整。加偏置使结果四舍五入（对正数）。
+
+对应代码：\texttt{*(p + inc) + 1) >> 1} 和 \texttt{(*(p - inc) + *(p + inc) + 2) >> 2}。
+\end{tcolorbox}
+
+\textbf{输出排列}：结果原地存储。偶数位置（低频/近似系数）在前，奇数位置（高频/细节系数）在后。在 JPEG XS 的码流中，先编码所有偶数位置（LL 子带），再编码所有奇数位置（HL/HH 等子带）。
+
+\textbf{代码实现}（\texttt{dwt.c:88}）：
+
+\begin{lstlisting}[language=C,caption={1D 5/3 Lifting 前向滤波——\texttt{dwt\_forward\_filter\_1d\_()}}]
+void dwt_forward_filter_1d_(xs_data_in_t* base, xs_data_in_t* end, ptrdiff_t inc)
+{
+    // Step 1: Odd samples (high pass)
+    xs_data_in_t* p = base + inc;
+    for (; p < end - inc; p += 2 * inc)
+        *p -= (*(p - inc) + *(p + inc)) >> 1;        // 内部奇数
+    if (p < end)
+        *p -= *(p - inc);                             // 最后一个奇数（边界）
+
+    // Step 2: Even samples (low pass)
+    p = base;
+    *p += (*(p + inc) + 1) >> 1;                      // 第一个偶数
+    p += 2 * inc;
+    for (; p < end - inc; p += 2 * inc)
+        *p += (*(p - inc) + *(p + inc) + 2) >> 2;    // 内部偶数
+    if (p < end)
+        *p += (*(p - inc) + 1) >> 1;                  // 最后一个偶数（边界）
+}
+\end{lstlisting}
+
+\subsection{1D 5/3 Lifting 逆变换}
+
+逆变换是正变换的严格逆序操作（\texttt{dwt.c:61}）。
+
+\textbf{Step 1：恢复偶数样本}
+\begin{align}
+x[0] &= s[0] - \left\lfloor \frac{d[1] + 1}{2} \right\rfloor \\
+x[i] &= s[i] - \left\lfloor \frac{d[i-1] + d[i+1] + 2}{4} \right\rfloor, \quad i = 2, 4, \ldots \\
+x[n-2] &= s[n-2] - \left\lfloor \frac{d[n-1] + 1}{2} \right\rfloor
+\end{align}
+
+\textbf{Step 2：恢复奇数样本}
+\begin{align}
+x[i] &= d[i] + \left\lfloor \frac{x[i-1] + x[i+1]}{2} \right\rfloor, \quad i = 1, 3, \ldots \\
+x[n-1] &= d[n-1] + x[n-2]
+\end{align}
+
+5/3 lifting 的正逆变换在整数域内\textbf{完全可逆}（前提是不经过量化截断；有量化时被丢弃的 bitplane 无法通过逆 DWT 恢复，整体仍是有损的）。
+
+\textbf{代码实现}（\texttt{dwt.c:61}）：
+
+\begin{lstlisting}[language=C,caption={1D 5/3 Lifting 逆向滤波——\texttt{dwt\_inverse\_filter\_1d\_()}}]
+void dwt_inverse_filter_1d_(xs_data_in_t* base, xs_data_in_t* end, ptrdiff_t inc)
+{
+    // Step 1: Even samples (low pass) — undo s → x
+    xs_data_in_t* p = base;
+    *p -= (*(p + inc) + 1) >> 1;
+    p += 2 * inc;
+    for (; p < end - inc; p += 2 * inc)
+        *p -= (*(p - inc) + *(p + inc) + 2) >> 2;
+    if (p < end)
+        *p -= (*(p - inc) + 1) >> 1;
+
+    // Step 2: Odd samples (high pass) — undo d → x
+    p = base + inc;
+    for (; p < end - inc; p += 2 * inc)
+        *p += (*(p - inc) + *(p + inc)) >> 1;
+    if (p < end)
+        *p += *(p - inc);
+}
+\end{lstlisting}
+
+\subsection{2D 分解顺序}
+
+JPEG XS 的 2D DWT 分解由两个阶段组成（\texttt{dwt\_forward\_transform()}，\texttt{dwt.c:161}）：
+
+\begin{lstlisting}[language=C,numbers=none]
+for k in 0 to ncomps - Sd - 1:          // 遍历每个分量
+    // Phase 1: NLy 层完整 2D 分解
+    for d in 0 to NLy[k] - 1:
+        vertical_1d_dwt(k, d, d)        // 垂直变换，inc = W × 2^d
+        horizontal_1d_dwt(k, d, d)      // 水平变换，inc = 2^d
+
+    // Phase 2: (NLx - NLy) 层纯水平分解
+    for d in NLy[k] to NLx[k] - 1:
+        horizontal_1d_dwt(k, d, NLy[k]) // 水平变换，inc = 2^d，垂直冻结
+\end{lstlisting}
+
+\textbf{Phase 1}（$d = 0$ 到 $NL_y - 1$）：每一层先做垂直分解再做水平分解。垂直和水平都按当前层级 $d$ 设置步长。
+
+\textbf{Phase 2}（$d = NL_y$ 到 $NL_x - 1$）：只做水平分解，垂直方向冻结在 $NL_y$ 层级（$v\_level = NLy$ 不变）。
+
+\textbf{步长含义}：
+\begin{itemize}
+  \item 水平 1D 变换的 $\mathit{inc} = 2^d$：相邻样本在数组中相隔 $2^d$ 个位置（水平方向）
+  \item 垂直 1D 变换的 $\mathit{inc} = W \times 2^d$：相邻样本在数组中相隔 $W \times 2^d$ 个位置（垂直方向，$W$ 为分量宽度）
+\end{itemize}
+
+这意味着在第 $d$ 层，只有前 $1/2^d$ 的低频子带被进一步分解。高频子带（已被上一层分离出来）被跳过。
+
+\subsection{源码摘录与逐段解释}
+
+以下摘录 \texttt{dwt\_forward\_transform()}（\texttt{dwt.c:161}）的完整 C 代码，并逐段解释：
+
+\begin{lstlisting}[language=C,caption={2D 前向 DWT 总入口——\texttt{dwt\_forward\_transform()}}]
+// dwt.c:161 — 2D 前向 DWT 总入口
+void dwt_forward_transform(const ids_t* ids, xs_image_t* im)
+{
+    for (int k = 0; k < ids->ncomps - ids->sd; ++k)
+    {
+        assert(ids->nlxyp[k].y <= ids->nlxyp[k].x);
+
+        // Phase 1: 完整 2D 分解，NLy 层
+        for (int d = 0; d < ids->nlxyp[k].y; ++d)
+        {
+            dwt_tranform_vertical_(ids, im, k, d, d, dwt_forward_filter_1d_);
+            dwt_tranform_horizontal_(ids, im, k, d, d, dwt_forward_filter_1d_);
+        }
+
+        // Phase 2: 纯水平分解，NLx - NLy 层
+        for (int d = ids->nlxyp[k].y; d < ids->nlxyp[k].x; ++d)
+        {
+            dwt_tranform_horizontal_(ids, im, k, d, ids->nlxyp[k].y, dwt_forward_filter_1d_);
+        }
+    }
+}
+\end{lstlisting}
+
+\begin{engineeringnote}
+\textbf{为什么先垂直后水平？} 以下三点是对代码中``先调用 \texttt{dwt\_transform\_vertical\_} 再调用 \texttt{dwt\_transform\_horizontal\_}''这一顺序的工程解释。
+
+\begin{enumerate}
+  \item \textbf{内存布局}：图像按行优先存储（\texttt{comps\_array[k]} 中行连续）。先做垂直变换时，每列的相邻元素在内存中间隔 $W$ 个位置（cache 友好）。如果先做水平，水平变换后的高频系数散布在内存中，后续垂直变换需要跨更大的间隔访问。
+  \item \textbf{渐进性}：先垂直后水平使得 LL 子带在内存中占据连续区域（偶数行的偶数列），方便后续的 precinct 提取。
+  \item \textbf{与 JPEG 2000 一致}：JPEG 2000 也使用先垂直后水平的顺序。
+\end{enumerate}
+\end{engineeringnote}
+
+\subsection{子带形成}
+
+每做一层分解，当前的低频子带被进一步细分。
+
+\textbf{一层分解}（$NL_x = 1, NL_y = 1$）：
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[scale=0.8]
+  % Original
+  \draw (0,0) rectangle (2,2);
+  \node at (1,1) {原始图像};
+  \draw[-{Stealth}, thick] (2.2,1) -- (3.8,1);
+  % Vertical
+  \draw (4,0) rectangle (6,2);
+  \draw (4,1) -- (6,1);
+  \node at (5,1.5) {L};
+  \node at (5,0.5) {H};
+  \node[below] at (5,0) {垂直分解};
+  \draw[-{Stealth}, thick] (6.2,1) -- (7.8,1);
+  % Horizontal
+  \draw (8,0) rectangle (10,2);
+  \draw (9,0) -- (9,2);
+  \draw (8,1) -- (10,1);
+  \node at (8.5,1.5) {LL};
+  \node at (9.5,1.5) {HL};
+  \node at (8.5,0.5) {LH};
+  \node at (9.5,0.5) {HH};
+  \node[below] at (9,0) {水平分解};
+\end{tikzpicture}
+\caption{一层 2D DWT 分解示意}
+\label{fig:dwt-1level}
+\end{figure}
+
+产生 4 个子带：LL（水平低频 + 垂直低频）、HL（水平高频 + 垂直低频）、LH（水平低频 + 垂直高频）、HH（水平高频 + 垂直高频）。
+
+\textbf{两层分解}（$NL_x = 2, NL_y = 1$）：
+\begin{lstlisting}[numbers=none]
+Phase 1 (d=0): 垂直+水平 → LL, HL, LH, HH
+Phase 2 (d=1): 仅对 LL 做水平分解 → LL2, HL2
+最终子带: LL2, HL2, HL, LH, HH  (共 5 个)
+\end{lstlisting}
+
+\textbf{子带总数}（每分量）：
+\begin{equation}\label{eq:nbands}
+N_{\mathit{bands}} = 1 + 2(NL_x - NL_y) + 3 \cdot NL_y = 1 + 2 \cdot NL_x + NL_y
+\end{equation}
+
+\subsection{子带索引与 \texttt{ids\_t} 映射}
+
+以 $NL_x = 2, NL_y = 1$ 为例，单分量的 band 编号：
+
+\begin{table}[H]
+\centering
+\caption{子带索引与 \texttt{ids\_t} 映射（$NL_x=2, NL_y=1$）}
+\label{tab:dwt-band-index}
+\begin{tabular}{@{}clllll@{}}
+\toprule
+band $b$ & \texttt{band\_is\_high.x} & \texttt{band\_is\_high.y} & \texttt{band\_d.x} & \texttt{band\_d.y} & 对应子带 \\
+\midrule
+0 & false & false & 2 & 1 & LL$_2$ \\
+1 & true  & false & 2 & 1 & HL$_2$ \\
+2 & true  & false & 1 & 1 & HL$_1$ \\
+3 & false & true  & 1 & 1 & LH$_1$ \\
+4 & true  & true  & 1 & 1 & HH$_1$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+band 编号规则：先排 Phase 2 的纯水平高频（$b = 1 \ldots NL_x - NL_y$），再排 Phase 1 的 3-band 组（HL, LH, HH），最后是最粗 LL（$b = 0$）。
+
+\section{处理流程}
+
+\subsection{编码端}
+
+\begin{lstlisting}[language=C,numbers=none]
+for each component k (except last Sd components):
+    // Phase 1: 逐层做垂直+水平（NLy 层）
+    for d = 0 to NLy - 1:
+        对每列做 1D 垂直 DWT（步长 = W × 2^d）
+        对每行做 1D 水平 DWT（步长 = 2^d）
+
+    // Phase 2: 纯水平（NLx - NLy 层）
+    for d = NLy to NLx - 1:
+        对每行做 1D 水平 DWT（步长 = 2^d，垂直步长冻结为 W × 2^NLy）
+\end{lstlisting}
+
+\subsection{解码端}
+
+逆向执行：
+
+\begin{lstlisting}[language=C,numbers=none]
+for each component k:
+    // Phase 2 逆: 纯水平
+    for d = NLx - 1 downto NLy:
+        逆水平 1D DWT
+
+    // Phase 1 逆: 垂直+水平
+    for d = NLy - 1 downto 0:
+        逆水平 1D DWT
+        逆垂直 1D DWT
+\end{lstlisting}
+
+\subsection{流程图}
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[
+    node distance=0.8cm and 0.8cm,
+    block/.style={rectangle, draw=structurecolor!60, fill=structurecolor!10,
+                  text width=4.4cm, align=center, minimum height=0.8cm,
+                  font=\small, inner sep=4pt},
+    decision/.style={diamond, draw=second!70, fill=second!12,
+                     text width=2.8cm, align=center, aspect=2.2,
+                     font=\footnotesize, inner sep=2pt},
+    arrow/.style={-{Stealth[length=2.5mm]}, thick, draw=structurecolor!60}
+]
+    \node[block] (input) {输入图像};
+    \node[block, below=of input] (p1) {Phase 1: $d=0\ldots NL_y{-}1$};
+    \node[block, below=of p1] (vert) {垂直 1D DWT\\$\mathit{inc}=W{\times}2^d$};
+    \node[block, below=of vert] (horiz) {水平 1D DWT\\$\mathit{inc}=2^d$};
+    \node[decision, below=of horiz] (check1) {继续\\Phase 1?};
+    \node[block, below=1.5cm of check1] (p2) {Phase 2: $d=NL_y\ldots NL_x{-}1$};
+    \node[block, below=of p2] (horiz2) {水平 1D DWT\\$\mathit{inc}=2^d$, 垂直冻结};
+    \node[decision, below=of horiz2] (check2) {继续\\Phase 2?};
+    \node[block, below=1.5cm of check2] (output) {子带系数输出};
+
+    \draw[arrow] (input) -- (p1);
+    \draw[arrow] (p1) -- (vert);
+    \draw[arrow] (vert) -- (horiz);
+    \draw[arrow] (horiz) -- (check1);
+    \draw[arrow] (check1) -- node[right,font=\small] {否} (p2);
+    \draw[arrow] (check1.west) -- ++(-1.8,0) node[above,font=\footnotesize] {是} |- (vert.west);
+    \draw[arrow] (p2) -- (horiz2);
+    \draw[arrow] (horiz2) -- (check2);
+    \draw[arrow] (check2) -- node[right,font=\small] {否} (output);
+    \draw[arrow] (check2.west) -- ++(-1.8,0) node[above,font=\footnotesize] {是} |- (horiz2.west);
+\end{tikzpicture}
+\caption{2D DWT 分解流程图}
+\label{fig:dwt-flowchart}
+\end{figure}
+
+\section{实现映射}
+
+\begin{implmap}
+\begin{tabular}{@{}L{2.8cm}L{1.8cm}L{4.5cm}L{5.5cm}@{}}
+\toprule
+标准概念 & 入口文件 & 关键函数/结构 & 说明 \\
+\midrule
+DWT 前向总入口 & \btt{dwt.c:161} & \btt{dwt\_forward\_transform()} & 控制 2D 分解顺序 \\
+DWT 逆向总入口 & \btt{dwt.c:143} & \btt{dwt\_inverse\_transform()} & 逆序执行 \\
+1D 前向滤波 & \btt{dwt.c:88} & \btt{dwt\_forward\_filter\_1d\_()} & 5/3 lifting 两步 \\
+1D 逆向滤波 & \btt{dwt.c:61} & \btt{dwt\_inverse\_filter\_1d\_()} & 逆 lifting \\
+垂直变换 & \btt{dwt.c:114} & \btt{dwt\_transform\_vertical\_()} & 按列调用 1D 滤波 \\
+水平变换 & \btt{dwt.c:128} & \btt{dwt\_transform\_horizontal\_()} & 按行调用 1D 滤波 \\
+IDS 构建 & \btt{ids.c:154} & \btt{ids\_construct()} & 计算子带尺寸和索引 \\
+\bottomrule
+\end{tabular}
+\end{implmap}
+
+\begin{codefact}
+本章关键结论依据以下函数：
+\begin{itemize}
+  \item \texttt{dwt\_forward\_filter\_1d\_()} --- \texttt{dwt.c:88} --- 1D 前向 lifting 两步
+  \item \texttt{dwt\_inverse\_filter\_1d\_()} --- \texttt{dwt.c:61} --- 1D 逆 lifting
+  \item \texttt{dwt\_forward\_transform()} --- \texttt{dwt.c:161} --- 2D 分解顺序控制
+  \item \texttt{dwt\_transform\_vertical\_()} --- \texttt{dwt.c:114} --- 垂直方向按列遍历
+  \item \texttt{ids\_construct()} --- \texttt{ids.c:154} --- 子带尺寸和索引计算
+\end{itemize}
+\end{codefact}
+
+\section{常见误解}
+
+\begin{misunderstanding}
+\begin{enumerate}
+  \item \textbf{``5/3 小波的 5 和 3 是 lifting 步骤数''} --- 不是。5 和 3 是分析滤波器的长度（tap length），分别对应低通和高通滤波器。
+  \item \textbf{``2D 分解是先水平后垂直''} --- JPEG XS 是\textbf{先垂直后水平}（\texttt{dwt.c:168-169}）。这与 JPEG 2000 一致，但与其他某些实现相反。
+  \item \textbf{``边界处理用镜像对称扩展''} --- Le Gall 5/3 lifting 不需要显式的对称扩展（padding）。它通过修改边界公式的邻居选择来隐式处理边界：最后奇数只用左邻居，最后偶数也只用左邻居。
+  \item \textbf{``$NL_x = NL_y$ 时，水平和垂直分解层数相同''} --- 正确。当 $NL_x = NL_y = 2$ 时，做 2 层完整的 2D 分解，产生 $1 + 2 \times 2 + 2 = 7$ 个子带。
+  \item \textbf{``$S_d = 1$ 意味着跳过最后一个分量的 DWT''} --- 正确。对于 Bayer 图像（4 分量，$S_d = 1$），只有前 3 个分量做 DWT，第 4 个分量直接进入 precinct。
+  \item \textbf{``5/3 lifting 是无损的''} --- 在整数域内且未经量化截断时，5/3 lifting 的正逆变换完全可逆。若有 GTLI 截断（$\mathrm{GTLI}>0$），被丢弃的低位 bitplane 无法通过逆 DWT 恢复。JPEG XS 的整体有损/无损取决于量化配置，而非单独由 DWT 决定。
+  \item \textbf{``Phase 2 的水平变换作用于整个图像''} --- 不是。Phase 2 只作用于当前最低频子带（LL），高频子带不再分解。这通过 $\mathit{inc} = 2^d$ 的大步长实现。
+\end{enumerate}
+\end{misunderstanding}
+
+\section{本章小结}
+
+DWT 是 JPEG XS 中引入频率域分析的核心模块。5/3 lifting 小波通过两步简单的整数运算实现可逆的频率分解。2D 分解通过先垂直后水平的逐层执行完成：Phase 1 做 $NL_y$ 层完整的 2D 分解，Phase 2 做 $(NL_x - NL_y)$ 层纯水平分解。分解后的子带被组织成 precinct 进行后续处理。
+
+关键实现要点：
+\begin{itemize}
+  \item 正变换的偶数步使用 Step 1 产生的 $d[j]$ 值，非原始输入值
+  \item 边界处理通过修改邻居选择（仅用一侧邻居）实现，无需 padding
+  \item 整数右移的 $+1$/$+2$ 偏置实现四舍五入
+\end{itemize}
+
+下一章将讲解子带如何组织为 precinct 和 packet，以及码流的渐进性（progression）顺序。

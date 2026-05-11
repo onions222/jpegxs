@@ -1,0 +1,188 @@
+% 05-mct.tex — MCT（多分量变换，Multiple Component Transform）
+% Source: chapters/05-mct-multiple-component-transform.md
+
+\chapter{MCT（多分量变换）}\label{ch:mct}
+
+\section{本章目标}
+
+\begin{itemize}
+  \item 理解 MCT 的作用：利用分量间的相关性进行色彩去相关
+  \item 掌握 RCT（Reversible Color Transform）的公式和无损性证明
+  \item 了解 Tetrix（Star-Tetrix）变换的设计思想和适用场景
+  \item 理解 Bayer 到 4 分量的转换逻辑
+\end{itemize}
+
+\section{背景与标准语义}
+
+MCT（Multiple Component Transform）在 NLT 之后执行，作用于分量之间。它利用同一像素位置不同分量之间的相关性来减少冗余。
+
+JPEG XS 定义了三种 MCT 模式：
+\begin{itemize}
+  \item \textbf{None}（$C_{pih} = 0$）：不做颜色变换，各分量独立处理
+  \item \textbf{RCT}（$C_{pih} = 1$）：可逆颜色变换，适用于常规 RGB 图像
+  \item \textbf{Tetrix}（$C_{pih} = 3$）：Star-Tetrix 变换，适用于 Bayer CFA 图像
+\end{itemize}
+
+\section{数学定义}
+
+\subsection{RCT（可逆颜色变换）}
+
+RCT 仅适用于 $C \geq 3$ 且 $s_x[c] = s_y[c] = 1$（$c = 0, 1, 2$）的场景。
+
+\subsubsection{前向变换}
+
+输入分量：$c_0 = R$, $c_1 = G$, $c_2 = B$
+\begin{align}
+Y &= \left\lfloor \frac{R + 2G + B}{4} \right\rfloor \label{eq:rct-y} \\
+C_b &= B - G \label{eq:rct-cb} \\
+C_r &= R - G \label{eq:rct-cr}
+\end{align}
+
+输出分量：$c_0 \to Y$, $c_1 \to C_b$, $c_2 \to C_r$
+
+在代码中（\texttt{mct.c:69}）：
+
+\begin{lstlisting}[language=C,caption={RCT 前向变换——\texttt{mct\_forward\_rct()}}]
+const xs_data_in_t g = *c1;
+const xs_data_in_t tmp = (*c0 + 2 * g + *c2) >> 2;
+*c1 = *c2 - g;    // Cb
+*c2 = *c0 - g;    // Cr
+*c0 = tmp;         // Y
+\end{lstlisting}
+
+注意分量赋值的顺序：必须先用 $g$（即原始 $G$）计算完所有值，再赋值。
+
+\subsubsection{逆向变换}
+
+\begin{align}
+G &= Y - \left\lfloor \frac{C_b + C_r}{4} \right\rfloor \\
+R &= G + C_r \\
+B &= G + C_b
+\end{align}
+
+\subsubsection{无损性证明}
+
+设 $S = R + 2G + B$。正变换：$Y = \lfloor S/4 \rfloor$，$C_b = B - G$，$C_r = R - G$。
+
+逆变换第一步：
+\begin{align}
+G &= Y - \lfloor (C_b + C_r) / 4 \rfloor \\
+  &= \lfloor S/4 \rfloor - \lfloor (B - G + R - G) / 4 \rfloor
+\end{align}
+
+当 $R + B$ 为偶数时，两个 floor 的差恰好为 $G$。当 $R + B$ 为奇数时，$C_b + C_r = R + B - 2G$ 与 $R + B$ 同奇偶，所以 $\lfloor S/4 \rfloor$ 和 $\lfloor (C_b + C_r)/4 \rfloor$ 的差始终等于 $G$。
+
+因此 \textbf{RCT 在整数域内是完全可逆的}。
+
+\subsection{Tetrix（Star-Tetrix）变换}
+
+Tetrix 专门用于 Bayer CFA 图像。
+
+\subsubsection{适用条件}
+
+\begin{itemize}
+  \item $C = 4$（四个分量）
+  \item $s_x[c] = s_y[c] = 1$（所有分量无子采样）
+  \item Bayer CFA 模式：RGGB, BGGR, GRBG, GBRG
+\end{itemize}
+
+\subsubsection{变换步骤（前向）}
+
+Tetrix 前向变换分 4 个 pass：
+
+\textbf{Pass 1：CbCr 预测}——对分量 1 和分量 2，减去四个邻居的均值：
+\begin{equation}
+c_1[x,y] \mathrel{-}= \left\lfloor \frac{c_1[x{-}1,y] + c_1[x{+}1,y] + c_1[x,y{-}1] + c_1[x,y{+}1]}{4} \right\rfloor
+\end{equation}
+
+\textbf{Pass 2：Y 预测}——对分量 0 和分量 3，使用加权邻居。
+
+\textbf{Pass 3：Delta}——对分量 3，减去四个对角邻居的均值。
+
+\textbf{Pass 4：Average}——对分量 0，加上四个对角邻居的均值。
+
+\subsection{Bayer 到 4 分量的转换}
+
+\texttt{mct\_bayer\_to\_4()}（\texttt{mct.c:413}）将单分量 Bayer 图像拆分为 4 个子图像：
+
+对于 RGGB 模式，$2\times2$ CFA 块：
+\begin{lstlisting}[numbers=none]
+R  Gr      →  c0=R   c1=Gr
+Gb  B      →  c2=Gb  c3=B
+\end{lstlisting}
+
+结果：图像宽度和高度各减半，分量数从 1 变为 4。
+
+\section{处理流程}
+
+\begin{lstlisting}[numbers=none]
+1. 如果是 Tetrix 模式:
+   a. mct_bayer_to_4(): Bayer → 4 分量
+   b. 分量指针交换: c0↔c2, c1↔c3
+
+2. 根据 Cpih 类型选择:
+   - NONE: 跳过
+   - RCT: 逐像素 (Y, Cb, Cr) 变换
+   - Tetrix: 4-pass 邻域预测变换
+\end{lstlisting}
+
+\subsection{流程图}
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[
+    node distance=0.8cm and 1.5cm,
+    block/.style={rectangle, draw=structurecolor!60, fill=structurecolor!10,
+                  text width=3.6cm, align=center, minimum height=0.8cm, font=\small, inner sep=4pt},
+    decision/.style={diamond, draw=second!70, fill=second!12,
+                     text width=3.0cm, align=center, aspect=2.2, font=\small, inner sep=2pt},
+    arrow/.style={-{Stealth[length=2.5mm]}, thick, draw=structurecolor!60}
+]
+    \node[block] (input) {NLT 后的分量};
+    \node[decision, below=of input] (type) {颜色变换\\类型?};
+    \node[block, below left=1.6cm and 1.6cm of type] (rct) {RCT:\\$Y=(R{+}2G{+}B)/4$,\\$U{=}B{-}G,\;V{=}R{-}G$};
+    \node[block, below right=1.6cm and 1.6cm of type] (tetrix) {Tetrix:\\4-pass 邻域预测};
+    \node[block, below=3.2cm of type] (output) {输出到 DWT};
+
+    \draw[arrow] (input) -- (type);
+    \draw[arrow] (type) -- node[above left,font=\small,xshift=-2pt,yshift=2pt] {RCT} (rct);
+    \draw[arrow] (type) -- node[above right,font=\small,xshift=2pt,yshift=2pt] {TETRIX} (tetrix);
+    \draw[arrow] (rct) -- (output);
+    \draw[arrow] (tetrix) -- (output);
+\end{tikzpicture}
+\caption{MCT 模式选择流程图}
+\label{fig:mct-flowchart}
+\end{figure}
+
+\section{实现映射}
+
+\begin{implmap}
+\begin{tabular}{@{}L{2.8cm}L{1.8cm}L{4.0cm}L{6.5cm}@{}}
+\toprule
+标准概念 & 入口文件 & 关键函数/结构 & 说明 \\
+\midrule
+MCT 前向总入口 & \btt{mct.c} & \btt{mct\_forward\_transform()} & 根据 \btt{color\_transform} 分发 \\
+MCT 逆向总入口 & \btt{mct.c} & \btt{mct\_inverse\_transform()} & 根据 \btt{color\_transform} 分发 \\
+RCT 前向 & \btt{mct.c:69} & \btt{mct\_forward\_rct()} & Eq~\eqref{eq:rct-y}--\eqref{eq:rct-cr} \\
+RCT 逆向 & \btt{mct.c:87} & \btt{mct\_inverse\_rct()} & 逆 RCT \\
+Tetrix 前向 & \btt{mct.c:157} & \btt{mct\_forward\_tetrix()} & 4-pass 邻域预测 \\
+Bayer 拆分 & \btt{mct.c:413} & \btt{mct\_bayer\_to\_4()} & 单分量 $\to$ 4 分量 \\
+\bottomrule
+\end{tabular}
+\end{implmap}
+
+\section{常见误解}
+
+\begin{misunderstanding}
+\begin{enumerate}
+  \item \textbf{``RCT 和 YCbCr 是一样的''} --- 不一样。RCT 是整数可逆的，使用 $(R + 2G + B)/4$ 作为亮度，而标准 YCbCr 使用浮点系数且是有损的。
+  \item \textbf{``Tetrix 只用于 Bayer''} --- 正确。Tetrix 要求 4 分量且无子采样，这正好对应 Bayer demosaicing 后的 4 子图像场景。
+  \item \textbf{``MCT 的分量顺序不变''} --- RCT 和 Tetrix 都会改变分量的语义。RCT 将 $R,G,B$ 变为 $Y, C_b, C_r$；Tetrix 还会交换分量指针。
+\end{enumerate}
+\end{misunderstanding}
+
+\section{本章小结}
+
+MCT 是 JPEG XS 中利用分量间相关性的模块。RCT 通过简单的整数运算实现 RGB $\to$ YCbCr 的无损变换。Tetrix 通过 4-pass 邻域预测处理 Bayer CFA 图像。
+
+下一章将讲解 DWT（离散小波变换）。

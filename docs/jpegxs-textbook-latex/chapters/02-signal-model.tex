@@ -1,0 +1,183 @@
+% 02-signal-model.tex — 信号模型、色彩采样与内部精度
+% Source: chapters/02-signal-model-color-sampling-and-internal-precision.md
+
+\chapter{信号模型、色彩采样与内部精度}\label{ch:signal-model}
+
+\section{本章目标}
+
+\begin{itemize}
+  \item 理解 JPEG XS 中图像数据的表示方式：\texttt{xs\_image\_t} 结构
+  \item 掌握子采样因子 $s_x[c], s_y[c]$ 对分量尺寸和后续小波分解的影响
+  \item 理解内部工作位宽 $B_w$ 和小数位 $F_q$ 的选择及其含义
+  \item 理解 sign-magnitude 表示法在量化阶段的作用
+\end{itemize}
+
+\section{图像数据模型}
+
+JPEG XS 的输入图像是一个多分量（multi-component）的二维采样数据。在标准中称为``图像''，但本质上可以是任何传感器数据。
+
+\subsection{\texttt{xs\_image\_t} 结构}
+
+\begin{lstlisting}[language=C,caption={图像数据结构——\texttt{xs\_image\_t}}]
+typedef struct xs_image_t {
+    int ncomps;                        // C: 分量数
+    int width;                         // W: 宽度（以最大小采样因子分量为基准）
+    int height;                        // H: 高度
+    int sx[MAX_NCOMPS];                // s_x[c]: 水平子采样因子
+    int sy[MAX_NCOMPS];                // s_y[c]: 垂直子采样因子
+    int depth;                         // d: 样本位深（bit depth）
+    xs_data_in_t* comps_array[MAX_NCOMPS]; // 各分量数据指针
+} xs_image_t;
+\end{lstlisting}
+
+\texttt{xs\_data\_in\_t} 定义为 \texttt{int32\_t}，保证足够的精度来表示中间计算结果。
+
+\subsection{分量的实际尺寸}
+
+分量 $c$ 的实际采样宽度和高度为：
+\begin{equation}
+W_c = W / s_x[c], \quad H_c = H / s_y[c]
+\end{equation}
+
+注意 $W, H$ 是以最大子采样因子分量（$s_x = s_y = 1$）为基准的。例如对于 YUV 4:2:0：
+\begin{itemize}
+  \item Y：$s_x = 1, s_y = 1$，尺寸 $W \times H$
+  \item U：$s_x = 2, s_y = 2$，尺寸 $(W/2) \times (H/2)$
+  \item V：$s_x = 2, s_y = 2$，尺寸 $(W/2) \times (H/2)$
+\end{itemize}
+
+\textbf{约束}：每个分量的 $s_x[c], s_y[c] \in \{1, 2\}$，且至少有一个分量的因子为 1。
+
+\section{像素值范围与 DC 电平}
+
+输入像素值为无符号整数，范围 $[0, 2^d - 1]$。
+
+JPEG XS 内部处理使用有符号整数。转换时需要减去 DC 电平（直流偏移），将无符号值映射到以零为中心的有符号范围。这个操作由 NLT（第 \ref{ch:nlt} 章）完成。
+
+直观理解：
+\begin{itemize}
+  \item 8-bit 像素值范围 $[0, 255]$，DC 电平 = 128
+  \item 转换后范围约为 $[-128, +127]$
+  \item 这样小波变换后的系数以零为中心分布，有利于压缩
+\end{itemize}
+
+\section{内部工作位宽 $B_w$}
+
+$B_w$ 是 NLT 变换后系数的位宽（不包含符号位）。它决定了：
+\begin{enumerate}
+  \item \textbf{系数的动态范围}：$[-2^{B_w}, 2^{B_w} - 1]$
+  \item \textbf{后续小波和量化的精度}
+  \item \textbf{与 $F_q$ 配合决定定点表示}
+\end{enumerate}
+
+\subsection{$B_w$ 的选择}
+
+$B_w$ 的默认值取决于所选的 Profile（Profile 命名规则的完整说明见第 \ref{ch:configuration} 章）。表中缩写的含义：\texttt{422\_10} = 4:2:2 子采样 + 10-bit，\texttt{444\_12} = 4:4:4 全分辨率 + 12-bit，\texttt{MLS} = 数学无损模式。
+
+\begin{table}[H]
+\centering
+\caption{各 Profile 的 $B_w$ 默认值}
+\label{tab:bw-profile}
+\begin{tabular}{@{}lp{2.5cm}p{6cm}@{}}
+\toprule
+Profile & 默认 $B_w$ & 为什么是这个值 \\
+\midrule
+Unrestricted & 20 & 开发调试用，用户可按需覆盖 \\
+Light/Main/High（422\_10, 444\_12） & 20 & 固定。20 bit 足够覆盖 10--12 bit 输入经 NLT 和 DWT 后的动态范围 \\
+MLS\_12 & $= d$（输入位深） & 数学无损要求不引入额外精度位；$B_w = d$ 保证逐 bit 可逆 \\
+Bayer & 18 或 20 & 取决于是否启用 NLT：启用时 20，不启用时 18 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+对于 10-bit 输入（$d = 10$），$B_w = 20$ 意味着 NLT 将精度从 10 bit 提升到 20 bit（通过 $B_w - d = 10$ 个额外的低位 bit）。
+
+\section{小数位 $F_q$}
+
+$F_q$ 是定点表示中的小数位数。它决定了系数从图像缓冲区到 precinct 工作区时的右移量。
+
+$F_q \in \{0, 6, 8\}$
+
+\subsection{定点转换}
+
+将整数系数 $v$ 转换为定点表示：
+\begin{equation}
+v_{\mathit{fixed}} = \mathrm{round}(v \,/\, 2^{F_q})
+\end{equation}
+
+代码中（\texttt{precinct\_from\_image()}，\texttt{precinct.c:194}）：
+
+\begin{lstlisting}[language=C]
+const sig_mag_data_in_t Fq_r = (1 << Fq) >> 1;  // 舍入项
+if (val >= 0)
+    *dst++ = (val + Fq_r) >> Fq;
+else
+    *dst++ = ((-val + Fq_r) >> Fq) | SIGN_BIT_MASK;
+\end{lstlisting}
+
+\section{Sign-Magnitude 表示}
+
+在 precinct 内部，系数以 sign-magnitude 格式存储：
+
+\begin{lstlisting}[language=C]
+typedef uint32_t sig_mag_data_t;      // 无符号，最高位为符号位
+typedef int32_t sig_mag_data_in_t;    // 有符号，用于图像数据
+
+#define SIGN_BIT_POSITION (sizeof(sig_mag_data_t) * 8 - 1)  // = 31
+#define SIGN_BIT_MASK (1 << SIGN_BIT_POSITION)               // = 0x80000000
+\end{lstlisting}
+
+\textbf{编码规则}：
+\begin{itemize}
+  \item 如果 $v \geq 0$：存储值 $= v$，符号位 $= 0$
+  \item 如果 $v < 0$：存储值 $= |v|$，符号位 $= 1$
+\end{itemize}
+
+\textbf{恢复规则}：
+\begin{lstlisting}[language=C,numbers=none]
+result = (val & SIGN_BIT_MASK) ? -((int32_t)(val & ~SIGN_BIT_MASK)) : (int32_t)val;
+\end{lstlisting}
+
+这种表示法的好处：可以直接用位运算提取符号位和幅度值，便于 bitplane 打包。
+
+\section{实现映射}
+
+\begin{implmap}
+\begin{tabular}{@{}L{2.5cm}L{3.5cm}L{4.8cm}L{4.5cm}@{}}
+\toprule
+标准概念 & 入口文件 & 关键函数/结构 & 说明 \\
+\midrule
+图像结构 & \btt{libjxs.h} & \btt{xs\_image\_t} & 图像数据容器 \\
+图像分配 & \btt{image.c} & \btt{xs\_allocate\_image()} & 分配各分量内存 \\
+内部精度 & \btt{libjxs.h} & \btt{xs\_data\_in\_t} = \btt{int32\_t} & 内部计算类型 \\
+Sign-magnitude & \btt{common.h} & \btt{sig\_mag\_data\_t}, \btt{SIGN\_BIT\_MASK} & precinct 内部表示 \\
+DC 电平 & \btt{nlt.c:121} & \btt{nlt\_forward\_linear()} & $\mathit{dclev} = (1 \ll Bw) \gg 1$ \\
+定点转换 & \btt{precinct.c:194} & \btt{precinct\_from\_image()} & $F_q$ 右移转换 \\
+\bottomrule
+\end{tabular}
+\end{implmap}
+
+\begin{codefact}
+本章关键结论依据以下函数：
+\begin{itemize}
+  \item \texttt{xs\_allocate\_image()} --- \texttt{image.c} --- 图像内存分配
+  \item \texttt{precinct\_from\_image()} --- \texttt{precinct.c:194} --- Fq 定点转换
+  \item \texttt{nlt\_forward\_linear()} --- \texttt{nlt.c:121} --- DC 电平计算
+\end{itemize}
+\end{codefact}
+
+\section{常见误解}
+
+\begin{misunderstanding}
+\begin{enumerate}
+  \item \textbf{``$B_w$ 就是输入位深''} --- 不一定。$B_w$ 是 NLT 输出后的内部位宽，通常大于输入位深。例如 10-bit 输入但 $B_w = 20$。
+  \item \textbf{``$F_q = 0$ 意味着没有精度损失''} --- 不准确。$F_q = 0$ 只表示不做定点截断，但后续量化仍然会损失精度。
+  \item \textbf{``子采样只影响色彩分量''} --- 子采样影响的是分量的尺寸和数据在内存中的布局，后续小波分解和 precinct 划分都以此为基础。
+\end{enumerate}
+\end{misunderstanding}
+
+\section{本章小结}
+
+本章建立了 JPEG XS 内部的数据模型：图像由多个分量组成，每个分量有自己的子采样因子和尺寸。通过 $B_w$ 控制内部位宽，$F_q$ 控制定点精度，sign-magnitude 表示为后续 bitplane 打包提供便利。
+
+下一章将讲解码流的配置体系：profile、level、sublevel 如何约束编码参数的选择。

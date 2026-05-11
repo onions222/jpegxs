@@ -1,0 +1,495 @@
+% 14-end-to-end-trace.tex — 端到端编码追踪
+% Source: chapters/14-end-to-end-annotated-encoding-trace.md
+
+\chapter{端到端编码追踪}\label{ch:e2e-trace}
+
+\section{本章目标}
+
+\begin{itemize}
+  \item 通过一个完整的编码示例，串联所有编码步骤
+  \item 理解数据在各模块之间的流转
+  \item 掌握从原始图像到码流的完整路径
+  \item 理解解码重建的完整逆路径
+\end{itemize}
+
+\section{背景与标准语义}
+
+本章以一个最小但完整的编码示例，追踪数据从输入图像到最终码流的每一步变换。选择 $2\times2$ RGB 图像配合 $NL_x=NL_y=1$，使每个子带只有一个系数，便于手工验证。
+
+\section{追踪配置}
+
+\textbf{输入图像}：$2\times2$ RGB（3 分量，无下采样，8-bit）
+
+\begin{lstlisting}[language=C,numbers=none]
+R 分量:     G 分量:     B 分量:
+[120  80     [200 180    [ 60  40
+ 100  60]     160 140]     50  30]
+\end{lstlisting}
+
+像素位置 $(0,0)$：$R=120, G=200, B=60$。像素 $(1,0)$：$R=80, G=180, B=40$。等等。
+
+\textbf{编码配置}：
+
+\begin{table}[H]
+\centering
+\caption{端到端追踪编码配置}
+\label{tab:e2e-config}
+\begin{tabular}{@{}lll@{}}
+\toprule
+参数 & 值 & 说明 \\
+\midrule
+$NL_x$ & 1 & 水平分解 1 层 \\
+$NL_y$ & 1 & 垂直分解 1 层 \\
+$F_q$ & 4 & 小数位 4 bit \\
+$B_w$ & 12 & 工作位宽 \\
+$N_g$ & 4 & Group 大小 \\
+$C_{pih}$ & 1 & RCT 颜色变换 \\
+$Q_{pih}$ & 0 & Dead-zone 量化 \\
+$F_s$ & 0 & 联合符号 \\
+$R_m$ & 0 & ZRF（零残差标志） \\
+Gain & $[2, 1, 1, 0]$ & 每分量 band 增益 \\
+Priority & $[0, 1, 2, 3]$ & 每分量 band 优先级 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{编码追踪}
+
+\subsection{Step 1：NLT 正变换}
+
+配置 $T_{nlt} = \mathrm{NONE}$，跳过。输入像素值保持不变。
+
+\subsection{Step 2：MCT 正变换（RCT）}
+
+对每个像素位置应用 RCT（\texttt{mct.c}，公式见第 5 章）：
+\begin{equation}
+Y = \left\lfloor \frac{R + 2G + B}{4} \right\rfloor, \quad U = B - G, \quad V = R - G
+\end{equation}
+
+\begin{table}[H]
+\centering
+\caption{RCT 结果}
+\label{tab:e2e-rct}
+\footnotesize
+\setlength{\tabcolsep}{4pt}
+\begin{tabular}{@{}lcccccc@{}}
+\toprule
+像素 & R & G & B & \multicolumn{1}{c}{Y} & \multicolumn{1}{c}{U} & \multicolumn{1}{c}{V} \\
+\midrule
+(0,0) & 120 & 200 & 60  & $\lfloor(120{+}400{+}60)/4\rfloor{=}\mathbf{145}$ & $60{-}200{=}\mathbf{-140}$ & $120{-}200{=}\mathbf{-80}$ \\
+(1,0) & 80  & 180 & 40  & $\lfloor(80{+}360{+}40)/4\rfloor{=}\mathbf{120}$  & $40{-}180{=}\mathbf{-140}$ & $80{-}180{=}\mathbf{-100}$ \\
+(0,1) & 100 & 160 & 50  & $\lfloor(100{+}320{+}50)/4\rfloor{=}\mathbf{117}$  & $50{-}160{=}\mathbf{-110}$ & $100{-}160{=}\mathbf{-60}$ \\
+(1,1) & 60  & 140 & 30  & $\lfloor(60{+}280{+}30)/4\rfloor{=}\mathbf{92}$   & $30{-}140{=}\mathbf{-110}$ & $60{-}140{=}\mathbf{-80}$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+RCT 后 3 个分量各 $2\times2$：
+
+\begin{lstlisting}[numbers=none]
+Y 分量:          U 分量:           V 分量:
+[145  120        [-140 -140        [-80  -100
+ 117   92]        -110 -110]        -60   -80]
+\end{lstlisting}
+
+\subsection{Step 3：DWT 正变换（$NL_x=1, NL_y=1$）}
+
+对每个分量做 2D DWT。由于图像是 $2\times2$，DWT 产生 4 个 $1\times1$ 子带（每个分量）。
+
+2D 分解顺序（\texttt{dwt.c:161}）：先垂直，后水平。
+
+\subsubsection{Y 分量（$2\times2$）}
+
+原始矩阵（内存中行优先）：$[145, 120, 117, 92]$
+
+\textbf{Phase 1 垂直}（对每列，$\mathit{inc} = W = 2$）：
+
+列 0：$[145, 117]$
+\begin{itemize}
+  \item 奇数（边界）：$d[1] = 117 - 145 = -28$
+  \item 偶数（首偶）：$s[0] = 145 + ((-28 + 1) \gg 1) = 145 + (-27 \gg 1)$
+\end{itemize}
+
+在 C 中，$-27 \gg 1 = -14$（算术右移）。$s[0] = 145 + (-14) = 131$
+
+\begin{tcolorbox}[colback=yellow!5,colframe=yellow!60!black,title=注意]
+这里涉及负数右移。C 标准规定有符号数右移是实现定义的，但主流编译器使用算术右移。libjxs 依赖此行为。
+\end{tcolorbox}
+
+列 0 结果：$[131, -28]$
+
+列 1：$[120, 92]$
+\begin{itemize}
+  \item 奇数（边界）：$d[1] = 92 - 120 = -28$
+  \item 偶数（首偶）：$s[0] = 120 + ((-28 + 1) \gg 1) = 120 + (-14) = 106$
+\end{itemize}
+列 1 结果：$[106, -28]$
+
+垂直分解后：$[131, 106, -28, -28]$（低频行在前，高频行在后）
+
+\textbf{Phase 1 水平}（对每行，$\mathit{inc} = 1$）：
+
+行 0（低频行）：$[131, 106]$
+\begin{itemize}
+  \item 奇数（边界）：$d[1] = 106 - 131 = -25$
+  \item 偶数（首偶）：$s[0] = 131 + ((-25 + 1) \gg 1) = 131 + (-12) = 119$
+\end{itemize}
+行 0 结果：$[119, -25]$
+
+行 1（高频行）：$[-28, -28]$
+\begin{itemize}
+  \item 奇数（边界）：$d[1] = -28 - (-28) = 0$
+  \item 偶数（首偶）：$s[0] = -28 + ((0 + 1) \gg 1) = -28 + 0 = -28$
+\end{itemize}
+行 1 结果：$[-28, 0]$
+
+\textbf{Y 分量 DWT 结果}（4 个 $1\times1$ 子带）：
+
+\begin{lstlisting}[numbers=none]
+LL: [119]    HL: [-25]
+LH: [-28]    HH: [0]
+\end{lstlisting}
+
+在内存中：$[119, -25, -28, 0]$（位置 0=LL, 1=HL, 2=LH, 3=HH）
+
+\subsubsection{U 分量（$2\times2$）}
+
+原始：$[-140, -140, -110, -110]$
+
+\textbf{垂直}：
+\begin{itemize}
+  \item 列 0：$[-140, -110]$：$d = -110-(-140) = 30$，$s = -140 + ((30+1)\gg1) = -140+15 = \mathbf{-125}$
+  \item 列 1：$[-140, -110]$：$d = 30$，$s = \mathbf{-125}$
+\end{itemize}
+垂直后：$[-125, -125, 30, 30]$
+
+\textbf{水平}：
+\begin{itemize}
+  \item 行 0：$[-125, -125]$：$d = -125-(-125) = 0$，$s = -125+0 = \mathbf{-125}$
+  \item 行 1：$[30, 30]$：$d = 30-30 = 0$，$s = 30+0 = \mathbf{30}$
+\end{itemize}
+
+\textbf{U 分量 DWT 结果}：
+
+\begin{lstlisting}[numbers=none]
+LL: [-125]    HL: [0]
+LH: [30]      HH: [0]
+\end{lstlisting}
+
+\subsubsection{V 分量（$2\times2$）}
+
+原始：$[-80, -100, -60, -80]$
+
+\textbf{垂直}：
+\begin{itemize}
+  \item 列 0：$[-80, -60]$：$d = 20$，$s = -80 + 10 = \mathbf{-70}$
+  \item 列 1：$[-100, -80]$：$d = 20$，$s = -100+10 = \mathbf{-90}$
+\end{itemize}
+垂直后：$[-70, -90, 20, 20]$
+
+\textbf{水平}：
+\begin{itemize}
+  \item 行 0：$[-70, -90]$：$d = -20$，$s = -70 + ((-20+1)\gg1) = -70+(-10) = \mathbf{-80}$
+  \item 行 1：$[20, 20]$：$d = 0$，$s = \mathbf{20}$
+\end{itemize}
+
+\textbf{V 分量 DWT 结果}：
+
+\begin{lstlisting}[numbers=none]
+LL: [-80]    HL: [-20]
+LH: [20]     HH: [0]
+\end{lstlisting}
+
+\subsection{Step 4：IDS 构建}
+
+\texttt{ids\_construct()} 构建空间索引。对于 $2\times2$ 输入、$NL_x=NL_y=1$：
+
+\begin{lstlisting}[numbers=none]
+每个分量: 4 bands (LL, HL, LH, HH)
+每个 band: 1×1（1 个系数）
+总 bands: 3 × 4 = 12
+precinct 数: npx × npy = 1 × 1 = 1（整个图像只有 1 个 precinct）
+\end{lstlisting}
+
+\subsection{Step 5：Precinct 提取与 $F_q$ 转换}
+
+\texttt{precinct\_from\_image()} 将 DWT 系数转换为 sign-magnitude 表示。
+
+转换公式（\texttt{precinct.c}，$F_q = 4$）：
+\begin{lstlisting}[language=C,numbers=none]
+Fq_r = (1 << Fq) >> 1;  // = 8
+if (val >= 0)
+    sm = (val + Fq_r) >> Fq;
+else
+    sm = ((-val + Fq_r) >> Fq) | SIGN_BIT_MASK;
+\end{lstlisting}
+
+\begin{table}[H]
+\centering
+\caption{$F_q$ 转换结果}
+\label{tab:e2e-fq}
+\begin{tabular}{@{}llrll@{}}
+\toprule
+Band & 分量 & DWT 系数 & 计算过程 & Sign-Magnitude \\
+\midrule
+LL & Y & 119  & $(119+8)\gg4 = 127\gg4 = \mathbf{7}$   & 7 \\
+HL & Y & $-25$ & $(25+8)\gg4 = 33\gg4 = \mathbf{2}$，负 $\to 2\,|\,0x80000000$ & 0x80000002 \\
+LH & Y & $-28$ & $(28+8)\gg4 = 36\gg4 = \mathbf{2}$，负 $\to 2\,|\,S$ & 0x80000002 \\
+HH & Y & 0    & $(0+8)\gg4 = 0$ & \textbf{0} \\
+LL & U & $-125$ & $(125+8)\gg4 = 133\gg4 = \mathbf{8}$，负 $\to 8\,|\,S$ & 0x80000008 \\
+HL & U & 0    & \textbf{0} & 0 \\
+LH & U & 30   & $(30+8)\gg4 = 38\gg4 = \mathbf{2}$ & 2 \\
+HH & U & 0    & \textbf{0} & 0 \\
+LL & V & $-80$ & $(80+8)\gg4 = 88\gg4 = \mathbf{5}$，负 $\to 5\,|\,S$ & 0x80000005 \\
+HL & V & $-20$ & $(20+8)\gg4 = 28\gg4 = \mathbf{1}$，负 $\to 1\,|\,S$ & 0x80000001 \\
+LH & V & 20   & $(20+8)\gg4 = 28\gg4 = \mathbf{1}$ & 1 \\
+HH & V & 0    & \textbf{0} & 0 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Step 6：GCLI 计算}
+
+\texttt{update\_gclis()} 对每个 band 行按 $N_g=4$ 分组计算 GCLI。由于每个 band 只有 1 个系数（1 组），GCLI 直接由该系数的幅度决定：
+\begin{equation}
+\mathit{GCLI} = \mathrm{BSR}(\text{幅度}) + 1
+\end{equation}
+
+\begin{table}[H]
+\centering
+\caption{GCLI 计算结果}
+\label{tab:e2e-gcli}
+\begin{tabular}{@{}lrlrl@{}}
+\toprule
+Band & 幅度 & Binary & BSR & GCLI \\
+\midrule
+LL (Y) & 7  & 0b0111 & 2 & \textbf{3} \\
+HL (Y) & 2  & 0b0010 & 1 & \textbf{2} \\
+LH (Y) & 2  & 0b0010 & 1 & \textbf{2} \\
+HH (Y) & 0  & ---    & --- & \textbf{0} \\
+LL (U) & 8  & 0b1000 & 3 & \textbf{4} \\
+HL (U) & 0  & ---    & --- & \textbf{0} \\
+LH (U) & 2  & 0b0010 & 1 & \textbf{2} \\
+HH (U) & 0  & ---    & --- & \textbf{0} \\
+LL (V) & 5  & 0b0101 & 2 & \textbf{3} \\
+HL (V) & 1  & 0b0001 & 0 & \textbf{1} \\
+LH (V) & 1  & 0b0001 & 0 & \textbf{1} \\
+HH (V) & 0  & ---    & --- & \textbf{0} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+GCLI 表（12 个 band 的 GCLI 值）：$[3, 2, 2, 0, 4, 0, 2, 0, 3, 1, 1, 0]$
+
+\subsection{Step 7：码率控制}
+
+假设总预算 200 bit，图像只有 1 个 precinct，全部分配给当前 precinct。
+
+$\mathit{GTLI} = \mathrm{clip}(Q - \mathit{gain} - [\mathit{priority} < R],\; 0,\; 15)$
+
+编码量计算（简化）：$Q=0, R=0$ 时 $\mathit{GTLI} = [0, 0, 0, 0]$，编码量 $\approx 120$ bit $< 200$，直接进入阶段 2。
+
+最终：$Q=0, R=\max$（无量化）。
+
+\subsection{Step 8：量化}
+
+$Q=0, R=\max$ 时 $\mathit{GTLI}=[0, 0, 0, 0]$，不做截断。所有系数保持原值。
+
+\subsection{Step 9：打包}
+
+以 LL(Y) 为例（$\mathit{GCLI}=3$，幅度=7，正数）：
+\begin{itemize}
+  \item 符号位：0（正）
+  \item Bitplane 2（$\mathit{GCLI}-1$）：7 的 bit 2 = 1
+  \item Bitplane 1：7 的 bit 1 = 1
+  \item Bitplane 0（$\mathit{GTLI}$）：7 的 bit 0 = 1
+  \item 编码：\texttt{0 1 1 1} = 4 bit
+\end{itemize}
+
+\subsection{Step 10：写入码流}
+
+最终码流结构：
+
+\begin{lstlisting}[numbers=none]
+SOC (0xFF10)
+PIH (0xFF12) — 图像参数
+CDT (0xFF13) — 分量描述: [8,1,1] × 3
+WGT (0xFF14) — band gains/priorities
+SLH (0xFF20) — slice header
+Precinct data — 编码后的系数
+EOC (0xFF11)
+\end{lstlisting}
+
+\section{解码追踪（逆路径）}
+
+\subsection{码流解析}
+
+\begin{lstlisting}[numbers=none]
+xs_parse_head() → 提取 PIH, CDT, WGT
+ids_construct() → 重建空间索引
+\end{lstlisting}
+
+\subsection{Precinct 解包}
+
+\begin{lstlisting}[numbers=none]
+unpack_precinct():
+  1. 读取 precinct header → Q=0, R=max, GTLI=[0,0,0,0]
+  2. 解码 subpacket:
+     - GCLI: [3, 2, 2, 0, 4, 0, 2, 0, 3, 1, 1, 0]
+     - 系数: sign-magnitude 值
+\end{lstlisting}
+
+\subsection{逆量化}
+
+$\mathit{GTLI}=0$，无截断。sign-magnitude 值直接使用。
+
+$\mathit{LL(Y)}$: sm=7（正）$\to$ DWT 系数 $= 7 \ll 4 = \mathbf{112}$
+
+$\mathit{HL(Y)}$: sm=0x80000002（负）$\to$ DWT 系数 $= -(2 \ll 4) = \mathbf{-32}$
+
+\begin{tcolorbox}[colback=yellow!5,colframe=yellow!60!black,title=精度损失]
+原始 DWT 系数为 119 和 $-25$，重建为 112 和 $-32$。这是因为 $F_q = 4$ 的定点化引入了 $\pm 8$ 以内的误差。
+\end{tcolorbox}
+
+\subsection{逆 DWT}
+
+对 Y 分量做逆 DWT。DWT 结果：$[112, -32, -32, 0]$（LL, HL, LH, HH）。
+
+逆变换（\texttt{dwt.c:143}）：先逆水平，后逆垂直。
+
+\textbf{逆水平}（对每行）：
+
+行 0：$[112, -32]$
+\begin{itemize}
+  \item 恢复偶数：$x[0] = 112 - ((-32+1)\gg1) = 112 - (-16) = \mathbf{128}$
+  \item 恢复奇数：$x[1] = -32 + 128 = \mathbf{96}$
+\end{itemize}
+
+行 1：$[-32, 0]$
+\begin{itemize}
+  \item 恢复偶数：$x[0] = -32 - ((0+1)\gg1) = -32 - 0 = \mathbf{-32}$
+  \item 恢复奇数：$x[1] = 0 + (-32) = \mathbf{-32}$
+\end{itemize}
+
+逆水平后：$[128, 96, -32, -32]$
+
+\textbf{逆垂直}（对每列）：
+
+列 0：$[128, -32]$
+\begin{itemize}
+  \item 恢复偶数：$x[0] = 128 - ((-32+1)\gg1) = 128 - (-16) = \mathbf{144}$
+  \item 恢复奇数：$x[1] = -32 + 144 = \mathbf{112}$
+\end{itemize}
+
+列 1：$[96, -32]$
+\begin{itemize}
+  \item 恢复偶数：$x[0] = 96 - ((-32+1)\gg1) = 96 - (-16) = \mathbf{112}$
+  \item 恢复奇数：$x[1] = -32 + 112 = \mathbf{80}$
+\end{itemize}
+
+\textbf{Y 分量恢复}：$[144, 112, 112, 80]$
+
+原始 Y 值：$[145, 120, 117, 92]$。恢复值：$[144, 112, 112, 80]$。
+
+误差：$-1, -8, -5, -12$。误差来源是 $F_q = 4$ 的定点化截断。
+
+\subsection{逆 MCT（RCT）}
+
+对每个像素位置：$G = Y - \lfloor(U + V)/4\rfloor,\; R = V + G,\; B = U + G$
+
+像素 $(0,0)$：$Y=144, U \approx -136, V \approx -80$
+\begin{align}
+G &= 144 - ((-136 + (-80)) \gg 2) = 144 - (-54) = 198 \\
+R &= -80 + 198 = 118 \\
+B &= -136 + 198 = 62
+\end{align}
+
+原始值：$R=120, G=200, B=60$。重建值：$R=118, G=198, B=62$。
+
+误差：$\Delta R = -2, \Delta G = -2, \Delta B = +2$。在 8-bit 可视范围内，误差小于 $3/255$，不可感知。
+
+\subsection{逆 NLT}
+
+$T_{nlt} = \mathrm{NONE}$，跳过。
+
+\section{数据流转图}
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[
+    node distance=0.7cm and 0.6cm,
+    block/.style={rectangle, draw=structurecolor!60, fill=structurecolor!10,
+                  text width=1.5cm, align=center, minimum height=0.65cm,
+                  font=\footnotesize, inner sep=3pt},
+    arrow/.style={-{Stealth[length=2mm]}, thick, draw=structurecolor!60}
+]
+    % Row 1
+    \node[block] (rgb) {RGB};
+    \node[block, right=of rgb] (nlt) {NLT};
+    \node[block, right=of nlt] (mct) {MCT};
+    \node[block, right=of mct] (dwt) {DWT};
+    \node[block, right=of dwt] (prec) {Precinct};
+
+    % Row 2
+    \node[block, below=0.9cm of rgb] (gcli) {GCLI};
+    \node[block, right=of gcli] (rc) {RC};
+    \node[block, right=of rc] (quant) {Quant};
+    \node[block, right=of quant] (pack) {Pack};
+    \node[block, right=of pack] (cs) {Code-stream};
+
+    % Row 1 arrows
+    \draw[arrow] (rgb) -- (nlt);
+    \draw[arrow] (nlt) -- (mct);
+    \draw[arrow] (mct) -- (dwt);
+    \draw[arrow] (dwt) -- (prec);
+
+    % Row 2 arrows
+    \draw[arrow] (gcli) -- (rc);
+    \draw[arrow] (rc) -- (quant);
+    \draw[arrow] (quant) -- (pack);
+    \draw[arrow] (pack) -- (cs);
+
+    % Inter-row arrow
+    \draw[arrow] (prec.south) -- ++(0,-0.3) -| (gcli.north);
+
+    % Label
+    \node[above=0.1cm of rgb, font=\footnotesize\bfseries] {编码路径};
+\end{tikzpicture}
+\caption{端到端编码数据流}
+\label{fig:e2e-flow}
+\end{figure}
+
+\section{精度分析}
+
+本例中 $F_q = 4$，即 DWT 系数以 16 为单位量化。每一步引入的误差：
+
+\begin{table}[H]
+\centering
+\caption{精度分析}
+\label{tab:e2e-precision}
+\begin{tabular}{@{}lll@{}}
+\toprule
+步骤 & 误差来源 & 典型幅度 \\
+\midrule
+MCT (RCT) & 除以 4 的截断 & $\pm 1$ \\
+DWT & 整数 lifting 的右移 & $\pm 1$ per step \\
+$F_q$ 转换 & 右移 4 位 & $\pm 8$ (DWT 域) \\
+量化 (GTLI) & bitplane 截断 & $2^{\mathit{GTLI}}$ per coefficient \\
+逆过程 & 累积误差 & 最终 $\pm 3$ per pixel \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+在本例中（$Q=0$，无量化），主要误差来自 $F_q$ 转换和 DWT 整数运算。
+
+\section{本章小结}
+
+通过这个 $2\times2$ RGB 的端到端追踪，我们展示了 JPEG XS 编码的完整流程：NLT $\to$ MCT(RCT) $\to$ DWT $\to$ precinct 提取 $\to$ GCLI 计算 $\to$ 码率控制 $\to$ 量化 $\to$ 打包。每一步的中间结果都可以通过手工计算验证。解码路径严格逆向执行，恢复出近似的图像。
+
+关键发现：
+\begin{itemize}
+  \item RCT 在像素域做颜色去相关，YUV 分量的动态范围比 RGB 更大
+  \item $2\times2$ 图像的 DWT 退化为 4 个 $1\times1$ 子带，但 lifting 公式仍然完整执行
+  \item $F_q = 4$ 的定点化引入 $\pm 8$ 的 DWT 域误差，逆变换后约为 $\pm 3$ 像素误差
+  \item 无量化（$Q=0$）时，主要误差来源是整数 lifting 和 $F_q$ 截断
+\end{itemize}

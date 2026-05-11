@@ -1,0 +1,205 @@
+% nlt-worked-examples.tex — NLT 算例
+% Source: examples/nlt-worked-examples.md
+
+\chapter{NLT 算例}\label{ex:nlt}
+
+对应章节：第 \ref{ch:nlt} 章（NLT）。
+
+\begin{examplebox}[title={例 1：NLT None（线性变换）}]
+
+\textbf{输入条件}：单个像素值 $x = 200$，输入位深 $d = 8$，$B_w = 20$。
+
+\medskip
+\textbf{已知参数}：
+
+\begin{tabular}{@{}lc@{}}
+\toprule
+参数 & 值 \\
+\midrule
+$d$ & 8 \\
+$B_w$ & 20 \\
+$s = B_w - d$ & 12 \\
+$\mathit{dclev} = 2^{B_w-1}$ & $2^{19} = 524288$ \\
+$\mathit{dclev\_and\_rounding} = \mathit{dclev} + 2^{s-1}$ & $524288 + 2048 = 526336$ \\
+$\mathit{max\_val} = 2^d - 1$ & 255 \\
+\bottomrule
+\end{tabular}
+
+\medskip
+\textbf{前向变换}（对照 \texttt{nlt\_forward\_linear()}）：
+
+$v_{\mathit{out}} = (200 \ll 12) - 524288 = 819200 - 524288 = 294912$
+
+\textbf{逆向变换}（对照 \texttt{nlt\_inverse\_linear()}）：
+
+$x_{\mathit{rec}} = \mathrm{clip}((294912 + 526336) \gg 12,\; 0,\; 255) = \mathrm{clip}(200.5,\; 0,\; 255) = 200$
+
+\medskip
+\textbf{中间变量表}：
+
+\begin{tabular}{@{}cllll@{}}
+\toprule
+步骤 & 方向 & 操作 & 计算 & 结果 \\
+\midrule
+1 & 前向 & 左移 $s$ 位 & $200 \times 4096$ & 819200 \\
+2 & 前向 & 减 $\mathit{dclev}$ & $819200 - 524288$ & 294912 \\
+3 & 逆向 & 加 $\mathit{dclev}$ + 舍入 & $294912 + 526336$ & 821248 \\
+4 & 逆向 & 右移 $s$ 位 & $821248 / 4096$ & $200.5 \to 200$ \\
+\bottomrule
+\end{tabular}
+
+\medskip
+\textbf{最终结果}：输入 200，经前向 $\to$ 逆向变换后恢复为 200。NLT 线性变换在整数域内无损。
+\end{examplebox}
+
+\begin{examplebox}[title={例 2：NLT Quadratic（二次变换）}]
+
+\textbf{输入条件}：单个像素值 $x = 100$，输入位深 $d = 8$，$B_w = 10$，参数 $\sigma = 0, \alpha = 0$。
+
+\medskip
+\textbf{已知参数}：
+
+\begin{tabular}{@{}lc@{}}
+\toprule
+参数 & 值 \\
+\midrule
+$d$ & 8 \\
+$B_w$ & 10 \\
+$s = B_w - d$ & 2 \\
+$\mathit{dclev} = 2^{B_w-1}$ & 512 \\
+$\mathit{max\_coef} = 2^{B_w} - 1$ & 1023 \\
+$v_{\mathit{dco}} = \alpha - \sigma \times 32768$ & 0 \\
+\bottomrule
+\end{tabular}
+
+\medskip
+\textbf{前向变换}（对照 \texttt{nlt\_forward\_quadratic()}）：
+
+\begin{enumerate}
+  \item $v_1 = \mathrm{clip}(100 - 0,\; 0,\; 255) = 100$
+  \item $v_2 = 100 \ll 2 = 400$
+  \item $\text{sqrt\_approx\_fixpoint}(400, 10) \to r = 40$，$r \gg 1 = 20$
+  \item $v_{\mathit{out}} = 20 - 512 = -492$
+\end{enumerate}
+
+\textbf{逆向变换}（对照 \texttt{nlt\_inverse\_quadratic()}）：
+
+\begin{enumerate}
+  \item $v = \mathrm{clip}(-492 + 512,\; 0,\; 1023) = 20$
+  \item $v^2 = 20^2 = 400$
+  \item $s_{\mathit{inv}} = 2 \cdot B_w - d = 12$
+  \item $x_{\mathit{rec}} = \mathrm{clip}((400 + (1 \ll 11)) \gg 12,\; 0,\; 255) = 0$
+\end{enumerate}
+
+\begin{engineeringnote}
+逆变换中 $s_{\mathit{inv}} = 12$，$v^2 = 400$ 远小于 $2^{12} = 4096$，右移后结果为 0。这说明 Quadratic NLT 的正逆变换不是严格互逆的——前向使用定点 $\sqrt{\cdot}$，逆向使用整数平方后右移，小值会因精度不足丢失信息。这是 JPEG XS 作为有损压缩标准的设计选择。
+\end{engineeringnote}
+
+\textbf{最终结果}：$B_w = 10$ 时，前向 $v_{\mathit{out}} = -492$，逆向 $x_{\mathit{rec}} = 0$。定点平方根本身精确（$\sqrt{400} = 20$），但逆变换的整数右移导致小值丢失。
+\end{examplebox}
+
+\begin{examplebox}[title={例 3：NLT Extended（扩展三段式变换）}]
+
+\textbf{输入条件}：$B_w = 10$，$E = 3$，$d = 8$，$T_1 = 84$，$T_2 = 256$。
+
+\medskip
+\textbf{派生常量}（对照 \texttt{nlt\_forward\_extended()}）：
+
+\begin{tabular}{@{}clll@{}}
+\toprule
+常量 & 公式 & 计算 & 结果 \\
+\midrule
+$B_2$ & $T_1^2$ & $84^2$ & 7056 \\
+$A_1$ & $B_2 + T_1 \times 2^e + 2^{2e-2}$ & $7056 + 10752 + 4096$ & 21904 \\
+$B_1$ & $T_1 + 2^{e-1}$ & $84 + 64$ & 148 \\
+$A_3$ & $B_2 + T_2 \times 2^e - 2^{2e-2}$ & $7056 + 32768 - 4096$ & 35728 \\
+$B_3$ & $T_2 - 2^{e-1}$ & $256 - 64$ & 192 \\
+$Q_1$ & $B_2 + T_1 \times 2^e$ & $7056 + 10752$ & 17808 \\
+$Q_2$ & $B_2 + T_2 \times 2^e$ & $7056 + 32768$ & 39824 \\
+\bottomrule
+\end{tabular}
+
+\medskip
+\textbf{子例 3a：线性区}（$x = 8$）：
+
+$v = 8 \ll 12 = 32768$。$Q_1 = 17808 \leq 32768 < 39824 = Q_2$，落入线性区。
+
+前向：$v_{\mathit{out}} = (32768 - 7056) / 128 - 512 = 201 - 512 = -311$
+
+逆向：$v = -311 + 512 = 201$，$201 \times 128 + 7056 = 32784$，$32784 \gg 12 = 8$。
+
+\textbf{往返验证：$x = 8 \to v_{\mathit{out}} = -311 \to x_{\mathit{rec}} = 8$。无损。}
+
+\medskip
+\textbf{子例 3b：高区}（$x = 100$）：
+
+$v = 100 \ll 12 = 409600 \geq Q_2$，落入高区。
+
+前向：$v = B_3 + \sqrt{409600 - 35728} = 192 + 611 = 803$，$v_{\mathit{out}} = 803 - 512 = 291$
+
+逆向：$v - B_3 = 611$，$611^2 = 373321$，$(35728 + 373321) \gg 12 = 99$
+
+\textbf{往返结果：$x = 100 \to v_{\mathit{out}} = 291 \to x_{\mathit{rec}} = 99$。偏差 1，由 \texttt{sqrt()} 浮点截断引入。}
+
+\medskip
+\textbf{子例 3c：低区}（$x = 3$）：
+
+$v = 3 \ll 12 = 12288 < Q_1$，落入低区。
+
+前向：$v = B_1 - \sqrt{21904 - 12288} = 148 - 98 = 50$，$v_{\mathit{out}} = 50 - 512 = -462$
+
+逆向：$B_1 - v = 98$，$98^2 = 9604$，$(21904 - 9604) \gg 12 = 2$
+
+\textbf{往返结果：$x = 3 \to v_{\mathit{out}} = -462 \to x_{\mathit{rec}} = 2$。偏差 1。}
+
+\medskip
+\textbf{最终结果}：
+
+\begin{tabular}{@{}clccl@{}}
+\toprule
+像素值 $x$ & 区域 & $v_{\mathit{out}}$ & $x_{\mathit{rec}}$ & 偏差 \\
+\midrule
+8 & 线性区 & $-311$ & 8 & 0（无损） \\
+3 & 低区 & $-462$ & 2 & 1 \\
+100 & 高区 & 291 & 99 & 1 \\
+\bottomrule
+\end{tabular}
+
+线性区往返无损。低区和高区各引入 1 个灰度级偏差，来源于 \texttt{sqrt()} 浮点截断。
+\end{examplebox}
+
+\begin{examplebox}[title={例 4：Extended NLT 自动阈值生成}]
+
+\textbf{输入条件}：目标阈值 $\mathit{th}_1 = 10$，$\mathit{th}_2 = 100$（像素域），$B_w = 18$，bpp $= 8$。
+
+\medskip
+\textbf{计算 $T_1$}（对照 \texttt{xs\_config\_nlt\_extended\_auto\_thresholds()}）：
+
+\begin{align*}
+T_1 &= \sqrt{2^{2e-2} + \mathit{th}_1 \times 2^s} - 2^{e-1} \\
+&= \sqrt{268435456 + 10 \times 268435456} - 16384 \\
+&= \sqrt{2952790016} - 16384 = 54339 - 16384 = 37955
+\end{align*}
+
+\textbf{计算 $T_2$}：
+
+\begin{align*}
+T_2 &= (\mathit{th}_2 \times 2^s - T_1^2) \gg e \\
+&= (100 \times 268435456 - 1440582025) \gg 15 \\
+&= 25402963575 \gg 15 = 775375
+\end{align*}
+
+\textbf{区域分布}：
+
+\begin{tabular}{@{}clc@{}}
+\toprule
+区域 & 像素范围 & 说明 \\
+\midrule
+低区 & 0--9 & 暗部，二次压缩 \\
+线性区 & 10--99 & 中间调，线性映射 \\
+高区 & 100--255 & 亮部，二次扩展 \\
+\bottomrule
+\end{tabular}
+
+给定 $\mathit{th}_1 = 10, \mathit{th}_2 = 100$，自动生成 $T_1 = 37955$、$T_2 = 775375$。
+\end{examplebox}

@@ -1,0 +1,78 @@
+% notation-table.tex — 附录：符号总表
+
+\chapter{符号总表}\label{app:notation}
+
+本附录汇总全书使用的所有符号，便于快速查阅。详细定义见 \cref{ch:notation}。
+
+\section{图像与分量}
+
+\begin{tabular}{@{}ll@{}}
+\toprule
+符号 & 含义 \\
+\midrule
+$W$ & 图像宽度（像素） \\
+$H$ & 图像高度（像素） \\
+$C$ & 分量总数 \\
+$c$ & 分量索引，$c = 0, 1, \ldots, C-1$ \\
+$(x, y)$ & 像素坐标 \\
+$d$ & 样本位深（bit depth） \\
+$s_x[c], s_y[c]$ & 分量 $c$ 的水平/垂直子采样因子 \\
+\bottomrule
+\end{tabular}
+
+\section{内部精度与 NLT 参数}
+
+\begin{tabular}{@{}ll@{}}
+\toprule
+符号 & 含义 \\
+\midrule
+$B_w$ & 内部工作位宽 \\
+$F_q$ & 小数位数（fractional bits） \\
+$T_1, T_2$ & NLT Extended 阈值 \\
+$E$ & NLT Extended 线性区斜率控制 \\
+$\sigma, \alpha$ & NLT Quadratic 参数 \\
+\bottomrule
+\end{tabular}
+
+\section{小波分解}
+
+\begin{tabular}{@{}ll@{}}
+\toprule
+符号 & 含义 \\
+\midrule
+$NL_x$ & 水平分解层数 \\
+$NL_y$ & 垂直分解层数 \\
+$b$ & 子带索引 \\
+$S_d$ & 小波变换抑制的分量数 \\
+\bottomrule
+\end{tabular}
+
+\section{Precinct 与 Packet}
+
+\begin{tabular}{@{}ll@{}}
+\toprule
+符号 & 含义 \\
+\midrule
+$C_w$ & 列宽（column width），以 8 为单位 \\
+$H_{sl}$ & slice 高度（以 precinct 行为单位） \\
+$(p_x, p_y)$ & precinct 列、行索引 \\
+$N_g$ & GCLI 组大小（group size） \\
+$S_s$ & 显著性标志步长 \\
+\bottomrule
+\end{tabular}
+
+\section{量化与码率控制}
+
+\begin{tabular}{@{}ll@{}}
+\toprule
+符号 & 含义 \\
+\midrule
+$GCLI_b$ & 子带 $b$ 的全局 CLI \\
+$GTLI_b$ & 子带 $b$ 的全局截断位位置 \\
+$Q$ & 量化参数（quantization） \\
+$R$ & 细化参数（refinement） \\
+$B_{total}$ & 总预算（bits） \\
+$B_{cbr}$ & CBR 分配预算 \\
+$B_{prec}$ & precinct 预算 \\
+\bottomrule
+\end{tabular}

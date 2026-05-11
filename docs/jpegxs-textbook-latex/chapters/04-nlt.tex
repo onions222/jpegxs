@@ -1,0 +1,333 @@
+% 04-nlt.tex — NLT（非线性变换，Non-Linear Transform）
+% Source: chapters/04-nlt-nonlinear-transform.md
+
+\chapter{NLT（非线性变换）}\label{ch:nlt}
+
+\section{本章目标}
+
+\begin{itemize}
+  \item 理解 NLT 的作用：将无符号像素值映射到以零为中心的有符号系数范围
+  \item 掌握三种 NLT 模式的数学定义：None、Quadratic、Extended
+  \item 理解 NLT Quadratic 中定点平方根近似算法的工作原理
+  \item 理解 NLT Extended 的三段式结构（低区、线性区、高区）
+\end{itemize}
+
+\section{背景与标准语义}
+
+NLT（Non-Linear Transform）是 JPEG XS 编码管线的第一个处理步骤。它的作用是将输入的无符号整数像素值 $[0, 2^d - 1]$ 转换为以零为中心的有符号系数，供后续的 MCT 和 DWT 使用。
+
+三种模式的设计意图：
+
+\begin{itemize}
+  \item \textbf{None}：线性映射，仅做 DC 电平移除和位宽扩展。适合已经以零为中心的数据或需要 Mathematically Lossless 的场景。
+  \item \textbf{Quadratic}：二次映射，$\sqrt{x}$ 前向、$x^2$ 逆向。对暗部区域分配更多精度（压缩动态范围），适合自然图像。
+  \item \textbf{Extended}：三段式映射，低区和高区使用二次曲线，中间线性区保持斜率。比 Quadratic 更灵活，可独立控制阈值和斜率。
+\end{itemize}
+
+\section{数学定义}
+
+\subsection{通用参数}
+
+\begin{table}[H]
+\centering
+\caption{NLT 通用参数}
+\label{tab:nlt-params}
+\begin{tabular}{@{}lp{4.5cm}ll@{}}
+\toprule
+符号 & 含义（在 NLT 中的作用） & 代码 & 典型值 \\
+\midrule
+$d$ & 输入图像的像素位深。例如 8-bit 图像 $d=8$，像素范围 $[0,255]$ & \texttt{im->depth} & 8--16 \\
+$B_w$ & NLT 输出后的内部位宽。通常 $B_w > d$，多出的位用于后续 DWT 和量化的精度 & \texttt{p.Bw} & 18--20 \\
+$s = B_w - d$ & 左移位数。NLT 第一步先把像素值左移 $s$ 位，从 $d$ bit 扩展到 $B_w$ bit & 计算值 & 0--12 \\
+$\mathit{dclev} = 2^{B_w-1}$ & DC 电平。左移后的值减去 $\mathit{dclev}$，把无符号范围 $[0,\ldots]$ 平移到以零为中心 & 计算值 & --- \\
+$\mathit{max\_val} = 2^d - 1$ & 原始像素的最大可能值。用于 clip 操作的上界 & 计算值 & --- \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{NLT None（线性）}
+
+前向变换（编码端）：
+\begin{equation}\label{eq:nlt-none-fwd}
+v_{\mathit{out}} = (x \ll s) - \mathit{dclev}
+\end{equation}
+
+这个式子将 $[0, 2^d-1]$ 映射到 $[-2^{B_w-1}, 2^{B_w-1} - 2^s]$，即以零为中心。
+
+逆向变换（解码端）：
+\begin{equation}\label{eq:nlt-none-inv}
+x_{\mathit{rec}} = \mathrm{clip}\!\left(\frac{v_{\mathit{out}} + \mathit{dclev} + 2^{s-1}}{2^s},\; 0,\; \mathit{max\_val}\right)
+\end{equation}
+
+其中 $2^{s-1}$ 是舍入项。
+
+\subsection{NLT Quadratic（二次）}
+
+\subsubsection{辅助参数}
+
+\begin{table}[H]
+\centering
+\caption{NLT Quadratic 辅助参数}
+\label{tab:nlt-quad-params}
+\begin{tabular}{@{}lp{3.5cm}l@{}}
+\toprule
+符号 & 定义（控制什么） & 代码 \\
+\midrule
+$\sigma$ & 符号标志（1 bit）。决定 $v_{\mathit{dco}}$ 的偏移方向：0 = 正偏移，1 = 负偏移 & \texttt{quadratic.sigma} \\
+$\alpha$ & DC 偏移量（15 bits）。控制零点附近的映射行为，调整暗部压缩曲线 & \texttt{quadratic.alpha} \\
+$v_{\mathit{dco}}$ & 等效 DC 电平。NLT 先减去此值再平方根，使映射曲线从合适的起点开始 & $\alpha - \sigma \times 32768$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsubsection{前向变换}
+
+\begin{align}
+v_1 &= \mathrm{clip}(x - v_{\mathit{dco}},\; 0,\; \mathit{max\_val}) \label{eq:nlt-q-v1} \\
+v_2 &= v_1 \ll s \label{eq:nlt-q-v2} \\
+v_3 &= \mathrm{sqrt\_approx}(v_2,\; B_w) \label{eq:nlt-q-v3} \\
+v_{\mathit{out}} &= v_3 - \mathit{dclev} \label{eq:nlt-q-out}
+\end{align}
+
+其中 $\mathrm{sqrt\_approx}(v, B_w)$ 是定点平方根近似算法（见下节）。
+
+这个变换的效果：对大值做平方根压缩，使暗部（小值）保留更多码空间。
+
+\subsubsection{逆向变换}
+
+\begin{align}
+v &= \mathrm{clip}(v_{\mathit{out}} + \mathit{dclev},\; 0,\; 2^{B_w} - 1) \label{eq:nlt-q-inv-v} \\
+v_{\mathit{rec}} &= v^2 \gg (2B_w - d) \quad \text{with rounding} \label{eq:nlt-q-inv-vrec} \\
+x_{\mathit{rec}} &= \mathrm{clip}(v_{\mathit{rec}} + v_{\mathit{dco}},\; 0,\; \mathit{max\_val}) \label{eq:nlt-q-inv-x}
+\end{align}
+
+注意前向用 $\sqrt{\cdot}$，逆向用 $(\cdot)^2$。由于定点近似，正逆变换不是严格互逆的。
+
+\subsubsection{定点平方根算法}
+
+\begin{lstlisting}[language=C,caption={定点平方根近似——\texttt{sqrt\_approx\_fixpoint()}（\texttt{nlt.c:85}）}]
+static INLINE int64_t sqrt_approx_fixpoint(int64_t v, const uint8_t Bw)
+{
+    assert(v >= 0);
+    int64_t r = 0;
+    for (int i = 0; i < Bw; ++i)
+    {
+        r <<= 1;
+        v <<= 2;
+        if ((v >> Bw) > r)
+        {
+            v -= (r + 1) << Bw;
+            r += 2;
+        }
+    }
+    return r >> 1;
+}
+\end{lstlisting}
+
+这是一个逐位（digit-by-digit）的定点平方根算法。每轮迭代处理 1 bit 输出精度，共 $B_w$ 轮，输出精度为 $B_w/2$ bit。
+
+算法本质：
+\begin{itemize}
+  \item $v$ 被左移 2 位（相当于处理输入的 2 bit）
+  \item $r$ 是当前部分结果
+  \item 比较 $(v \gg B_w)$ 与 $r$ 决定当前位是 0 还是 1
+  \item 共 $B_w$ 轮迭代
+\end{itemize}
+
+\subsection{NLT Extended（扩展）}
+
+\subsubsection{参数}
+
+\begin{table}[H]
+\centering
+\caption{NLT Extended 参数}
+\label{tab:nlt-ext-params}
+\begin{tabular}{@{}lp{5.5cm}l@{}}
+\toprule
+符号 & 含义（控制什么） & 代码 \\
+\midrule
+$T_1$ & 低区→线性区的分界值。像素值低于 $T_1$ 时走二次曲线（暗部压缩），高于 $T_1$ 走线性区 & \texttt{extended.T1} \\
+$T_2$ & 线性区→高区的分界值。像素值高于 $T_2$ 时走二次曲线（高光压缩），$T_1$ 到 $T_2$ 之间为线性 & \texttt{extended.T2} \\
+$E$ & 线性区的斜率控制参数（3 bit，值 0--7）。$E$ 越大，线性区斜率越陡 & \texttt{extended.E} \\
+$e = B_w - E$ & 实际参与运算的辅助指数，$E$ 越大则 $e$ 越小，线性区越平缓 & 计算值 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsubsection{派生常量}
+
+\begin{align}
+B_2 &= T_1^2 \\
+A_1 &= B_2 + T_1 \cdot 2^e + 2^{2e-2} \\
+B_1 &= T_1 + 2^{e-1} \\
+A_3 &= B_2 + T_2 \cdot 2^e - 2^{2e-2} \\
+B_3 &= T_2 - 2^{e-1} \\
+Q_1 &= B_2 + T_1 \cdot 2^e \\
+Q_2 &= B_2 + T_2 \cdot 2^e
+\end{align}
+
+\subsubsection{前向变换}
+
+\begin{equation}
+v = x \ll s
+\end{equation}
+
+三段处理：
+
+\textbf{低区}（$v < Q_1$）：
+\begin{equation}
+v_{\mathit{out}} = B_1 - \sqrt{A_1 - v} - \mathit{dclev}
+\end{equation}
+
+\textbf{线性区}（$Q_1 \leq v < Q_2$）：
+\begin{equation}
+v_{\mathit{out}} = v - B_2 \,/\, 2^e - \mathit{dclev}
+\end{equation}
+
+\textbf{高区}（$v \geq Q_2$）：
+\begin{equation}
+v_{\mathit{out}} = B_3 + \sqrt{v - A_3} - \mathit{dclev}
+\end{equation}
+
+注意：前向变换中低区和高区使用 \texttt{sqrt()}（C 标准库浮点函数），线性区使用整数右移。
+
+\subsubsection{逆向变换}
+
+\begin{equation}
+v = v_{\mathit{out}} + \mathit{dclev}
+\end{equation}
+
+\textbf{低区}（$v < T_1$）：
+\begin{equation}
+v_{\mathit{rec}} = \mathrm{clip}\!\left(\frac{A_1 - (B_1 - v)^2 + \mathit{rounding}}{2^{2s}},\; 0,\; \mathit{max\_val}\right)
+\end{equation}
+
+\textbf{线性区}（$T_1 \leq v < T_2$）：
+\begin{equation}
+v_{\mathit{rec}} = \frac{v \cdot 2^e + B_2 + \mathit{rounding}}{2^{2s}}
+\end{equation}
+
+\textbf{高区}（$v \geq T_2$）：
+\begin{equation}
+v_{\mathit{rec}} = \mathrm{clip}\!\left(\frac{(v - B_3)^2 + A_3 + \mathit{rounding}}{2^{2s}},\; 0,\; \mathit{max\_val}\right)
+\end{equation}
+
+注意：逆变换中低区和高区使用 $(\cdot)^2$（整数平方），与前向的 $\sqrt{\cdot}$ 互为逆操作。
+
+\subsection{阈值自动生成}
+
+\texttt{xs\_config\_nlt\_extended\_auto\_thresholds()}（\texttt{nlt.c:316}）根据目标 bpp 自动计算 $T_1, T_2$：
+\begin{align}
+T_1 &= \sqrt{2^{2e-2} + \mathit{th1} \cdot 2^s} - 2^{e-1} \\
+T_2 &= \mathit{th2} \cdot 2^s - T_1^2 \,/\, 2^e
+\end{align}
+
+其中 $\mathit{th1}$ 和 $\mathit{th2}$ 是用户指定的目标像素值阈值。
+
+\section{处理流程}
+
+\subsection{编码端（前向）}
+
+\begin{lstlisting}[language=C,numbers=none]
+for each component c:
+    for each sample in component c:
+        1. 根据 Tnlt 类型选择变换函数
+        2. 应用前向变换公式
+        3. 结果存回原位置（in-place）
+\end{lstlisting}
+
+\subsection{解码端（逆向）}
+
+\begin{lstlisting}[language=C,numbers=none]
+for each component c:
+    for each sample in component c:
+        1. 根据 Tnlt 类型选择逆变换函数
+        2. 应用逆变换公式
+        3. 结果存回原位置（in-place）
+\end{lstlisting}
+
+注意：NLT 对每个分量独立处理，不涉及分量间交互。
+
+\subsection{流程图}
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[
+    node distance=1cm and 1.8cm,
+    block/.style={rectangle, draw=structurecolor!60, fill=structurecolor!10,
+                  text width=2.8cm, align=center, minimum height=0.85cm,
+                  font=\small, inner sep=4pt},
+    decision/.style={diamond, draw=second!70, fill=second!12,
+                     text width=3.2cm, align=center, aspect=2.5,
+                     font=\small, inner sep=2pt},
+    arrow/.style={-{Stealth[length=2.5mm]}, thick, draw=structurecolor!60}
+]
+    \node[block] (input) {输入像素值};
+    \node[decision, below=of input] (type) {NLT 类型?\\$T_{\mathit{nlt}}$};
+    \node[block, below left=1.8cm and 2.2cm of type] (none)  {NONE:\\直接传递};
+    \node[block, below=2cm of type] (quad) {QUADRATIC:\\定点平方根近似};
+    \node[block, below right=1.8cm and 2.2cm of type] (ext) {EXTENDED:\\三段映射};
+    \node[block, below=4cm of type] (output) {输出到 MCT};
+
+    \draw[arrow] (input) -- (type);
+    \draw[arrow] (type) -| node[above left,font=\footnotesize,pos=0.3] {NONE} (none);
+    \draw[arrow] (type) -- node[right,font=\footnotesize,pos=0.4] {QUAD} (quad);
+    \draw[arrow] (type) -| node[above right,font=\footnotesize,pos=0.3] {EXT} (ext);
+    \draw[arrow] (none) |- (output);
+    \draw[arrow] (quad) -- (output);
+    \draw[arrow] (ext) |- (output);
+\end{tikzpicture}
+\caption{NLT 模式选择流程图}
+\label{fig:nlt-flowchart}
+\end{figure}
+
+\section{实现映射}
+
+\begin{implmap}
+\begin{tabular}{@{}L{2.8cm}L{1.5cm}L{4.0cm}L{4.5cm}@{}}
+\toprule
+标准概念 & 入口文件 & 关键函数/结构 & 说明 \\
+\midrule
+NLT 前向总入口 & \btt{nlt.c} & \btt{nlt\_forward\_transform()} & 根据 \btt{Tnlt} 分发到具体函数 \\
+NLT 逆向总入口 & \btt{nlt.c} & \btt{nlt\_inverse\_transform()} & 根据 \btt{Tnlt} 分发 \\
+线性前向 & \btt{nlt.c:121} & \btt{nlt\_forward\_linear()} & Eq~\eqref{eq:nlt-none-fwd} \\
+二次前向 & \btt{nlt.c:162} & \btt{nlt\_forward\_quadratic()} & Eq~\eqref{eq:nlt-q-v1}--\eqref{eq:nlt-q-out} \\
+扩展前向 & \btt{nlt.c:226} & \btt{nlt\_forward\_extended()} & 三段式变换 \\
+定点平方根 & \btt{nlt.c:85} & \btt{sqrt\_approx\_fixpoint()} & 逐位逼近算法 \\
+阈值自动生成 & \btt{nlt.c:316} & \btt{xs\_config\_nlt\_extended\_auto\_thresholds()} & 自动计算 $T_1, T_2$ \\
+\bottomrule
+\end{tabular}
+\end{implmap}
+
+\begin{codefact}
+本章关键结论依据以下函数：
+\begin{itemize}
+  \item \texttt{nlt\_forward\_transform()} --- \texttt{nlt.c} --- NLT 正变换入口，根据 Tnlt 分发
+  \item \texttt{nlt\_forward\_quadratic()} --- \texttt{nlt.c:162} --- 二次变换核心
+  \item \texttt{sqrt\_approx\_fixpoint()} --- \texttt{nlt.c:85} --- 定点平方根近似
+\end{itemize}
+\end{codefact}
+
+\section{常见误解}
+
+\begin{misunderstanding}
+\begin{enumerate}
+  \item \textbf{``NLT 是有损的''} --- NLT None 在整数域内是无损的。Quadratic 和 Extended 由于定点近似引入微小误差，但这通常比后续量化引入的误差小得多。
+  \item \textbf{``Quadratic 和 Extended 的平方/平方根是精确的''} --- 不是。前向使用 \texttt{sqrt\_approx\_fixpoint()}（Quadratic）或 C 标准库 \texttt{sqrt()}（Extended），逆向使用整数平方和移位。定点近似不可避免地引入舍入误差。
+  \item \textbf{``$v_{\mathit{dco}}$ 总是 0''} --- 当 $\sigma = 0$ 且 $\alpha = 0$ 时确实为 0。但用户可以设置非零值来调整暗部映射。
+  \item \textbf{``Extended 的 $T_1, T_2$ 和 Quadratic 的参数有关''} --- 无关。Extended 和 Quadratic 是完全独立的两种变换，参数不互通。
+\end{enumerate}
+\end{misunderstanding}
+
+\section{与前后章衔接}
+
+\begin{itemize}
+  \item \textbf{输入}：本章的输入是原始图像像素值，存储在 \texttt{xs\_image\_t.comps\_array[]} 中
+  \item \textbf{输出}：本章的输出（NLT 变换后的像素值）传递给第 \ref{ch:dwt} 章的前一步——第 05 章（MCT）做颜色空间变换
+\end{itemize}
+
+\section{本章小结}
+
+NLT 是 JPEG XS 编码管线的第一步，负责将无符号像素值映射到以零为中心的有符号系数。三种模式从简到繁：None（纯线性）、Quadratic（全局二次压缩）、Extended（三段式灵活控制）。选择哪种模式取决于应用对压缩率和复杂度的要求。
+
+下一章将讲解 MCT（多分量变换），它在 NLT 之后执行，负责利用分量间的相关性（色彩去相关）。

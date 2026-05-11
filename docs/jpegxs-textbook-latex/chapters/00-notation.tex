@@ -1,0 +1,184 @@
+% 00-notation.tex — 符号与约定（Notation and Conventions）
+
+\chapter{符号与约定}\label{ch:notation}
+
+\section{本章目标}
+
+\begin{itemize}
+  \item 定义全书统一的符号体系，避免后续章节出现歧义
+  \item 规范公式写法、变量命名、舍入标注方式
+  \item 给出实现映射的固定格式模板
+\end{itemize}
+
+\section{图像与分量}
+
+\begin{table}[H]
+\centering
+\caption{图像与分量符号}
+\label{tab:notation-image}
+\begin{tabular}{@{}lll@{}}
+\toprule
+符号 & 含义 & 备注 \\
+\midrule
+$W$ & 图像宽度（像素） & \texttt{xs\_image\_t.width} \\
+$H$ & 图像高度（像素） & \texttt{xs\_image\_t.height} \\
+$C$ & 分量总数 & \texttt{xs\_image\_t.ncomps}，典型值 1, 3, 4 \\
+$c$ & 分量索引 & $c = 0, 1, \ldots, C-1$ \\
+$(x, y)$ & 像素坐标 & $0 \leq x < W$, $0 \leq y < H$ \\
+$d$ & 样本位深（bit depth） & \texttt{xs\_image\_t.depth}，典型值 8--16 \\
+$s_x[c], s_y[c]$ & 分量 $c$ 的水平/垂直子采样因子 & \texttt{xs\_image\_t.sx[c], sy[c]}，值为 1 或 2 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{内部精度与 NLT 参数}
+
+\begin{table}[H]
+\centering
+\caption{内部精度与 NLT 参数符号}
+\label{tab:notation-nlt}
+\begin{tabular}{@{}lll@{}}
+\toprule
+符号 & 含义 & 备注 \\
+\midrule
+$B_w$ & 内部工作位宽 & \texttt{p.Bw}；控制 NLT 后系数范围 \\
+$F_q$ & 小数位数（fractional bits） & \texttt{p.Fq}；控制定点精度，典型值 0, 6, 8 \\
+$T_1, T_2$ & NLT Extended 阈值 & \texttt{p.Tnlt\_params.extended.T1, T2} \\
+$E$ & NLT Extended 线性区斜率控制 & \texttt{p.Tnlt\_params.extended.E} \\
+$\sigma, \alpha$ & NLT Quadratic 参数 & \texttt{p.Tnlt\_params.quadratic} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{小波分解}
+
+\begin{table}[H]
+\centering
+\caption{小波分解符号}
+\label{tab:notation-dwt}
+\begin{tabular}{@{}lll@{}}
+\toprule
+符号 & 含义 & 备注 \\
+\midrule
+$NL_x$ & 水平分解层数 & \texttt{p.NLx}，范围 1--5 \\
+$NL_y$ & 垂直分解层数 & \texttt{p.NLy}，范围 0--2，且 $NL_y \leq NL_x$ \\
+$b$ & 子带索引 & 一个分量内的子带编号 \\
+$S_d$ & 小波变换抑制的分量数 & \texttt{p.Sd}；最后 $S_d$ 个分量不做 DWT \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Precinct 与 Packet}
+
+\begin{table}[H]
+\centering
+\caption{Precinct 与 Packet 符号}
+\label{tab:notation-precinct}
+\begin{tabular}{@{}lll@{}}
+\toprule
+符号 & 含义 & 备注 \\
+\midrule
+$C_w$ & 列宽（column width），以 8 为单位 & \texttt{p.Cw} \\
+$H_{sl}$ & slice 高度（以 precinct 行为单位） & \texttt{p.slice\_height} \\
+$(p_x, p_y)$ & precinct 列、行索引 & \\
+$N_g$ & GCLI 组大小（group size） & \texttt{p.N\_g}，固定为 4 \\
+$S_s$ & 显著性标志步长 & \texttt{p.S\_s}，固定为 8 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{量化与码率控制}
+
+\begin{table}[H]
+\centering
+\caption{量化与码率控制符号}
+\label{tab:notation-quant}
+\begin{tabular}{@{}lll@{}}
+\toprule
+符号 & 含义 & 备注 \\
+\midrule
+$GCLI_b$ & 子带 $b$ 的全局 CLI & 表示该组中最大系数的最高非零位位置 \\
+$GTLI_b$ & 子带 $b$ 的全局截断位位置 & 低于此位置的 bitplane 被丢弃 \\
+$Q$ & 量化参数（quantization） & \texttt{rc\_results.quantization} \\
+$R$ & 细化参数（refinement） & \texttt{rc\_results.refinement} \\
+$B_{total}$ & 总预算（bits） & \\
+$B_{cbr}$ & CBR 分配预算 & \texttt{budget\_getcbr()} \\
+$B_{prec}$ & precinct 预算 & \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{公式规范}
+
+\subsection{舍入与截断}
+
+\begin{itemize}
+  \item $\lfloor x \rfloor$：向下取整
+  \item $\lceil x \rceil$：向上取整
+  \item $\mathrm{round}(x)$：四舍五入（ties away from zero）
+  \item $\mathrm{trunc}(x)$：截断小数部分
+  \item $\mathrm{clip}(x, a, b) = \min(\max(x, a), b)$：钳位到 $[a, b]$
+\end{itemize}
+
+\subsection{位运算}
+
+\begin{itemize}
+  \item $x \gg n$：算术右移（当 $x$ 为有符号时）或逻辑右移（当 $x$ 为无符号时）
+  \item $x \ll n$：左移
+  \item $x \mathbin{\&} y$：按位与
+  \item $x \mid y$：按位或
+\end{itemize}
+
+\subsection{整数除法说明}
+
+C 语言中的整数除法对负数向零截断。教材中统一写为：
+\begin{equation}
+\mathrm{div}(a, b) = \lfloor a / b \rfloor \quad (\text{当 } a \geq 0 \text{ 或 } b > 0 \text{ 时取 floor})
+\end{equation}
+
+如果需要向零截断的语义，使用 $\mathrm{trunc}(a / b)$。
+
+当使用右移代替除法时，等价于 $\lfloor a / 2^n \rfloor$（对所有符号均成立）。
+
+\section{实现映射格式}
+
+每个章节末尾的实现映射使用以下格式：
+
+\begin{implmap}
+\begin{tabular}{@{}L{1.8cm}L{1.5cm}L{3.0cm}L{4.5cm}@{}}
+\toprule
+标准概念 & 入口文件 & 关键函数/结构 & 说明 \\
+\midrule
+XXX & \btt{xxx.c} & \btt{xxx\_func()} & 一句话说明 \\
+\bottomrule
+\end{tabular}
+\end{implmap}
+
+\section{算例格式}
+
+每个算例使用以下固定结构：
+
+\begin{enumerate}
+  \item \textbf{输入条件}：明确给出数值输入
+  \item \textbf{已知参数}：列出所有相关参数
+  \item \textbf{中间变量表}：逐步列出计算过程中的中间值
+  \item \textbf{逐步计算}：每一步都要写出公式和代入结果
+  \item \textbf{最终结果}：明确标出
+  \item \textbf{与代码位置对应}：标注来源函数和行号
+\end{enumerate}
+
+\section{术语约定}
+
+\begin{itemize}
+  \item 首次出现的标准术语使用 \textbf{中文名（英文名）} 格式
+  \item 例如：非线性变换（Non-Linear Transform, NLT）
+  \item 函数名、变量名保留英文原文
+  \item 标准条款引用格式：ISO/IEC 21122-1, Annex/Section X.Y
+\end{itemize}
+
+\section{与前后章衔接}
+
+\begin{itemize}
+  \item \textbf{输入}：本章为全书约定，无前驱章节
+  \item \textbf{输出}：后续所有章节（Ch01--Ch15）均遵循本章定义的符号、格式和术语约定
+\end{itemize}

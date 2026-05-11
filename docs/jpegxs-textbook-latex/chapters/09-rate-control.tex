@@ -1,0 +1,361 @@
+% 09-rate-control.tex — 预算表与码率控制
+% Source: chapters/09-budget-tables-and-rate-control.md
+
+\chapter{预算表与码率控制}\label{ch:rate-control}
+
+\section{本章目标}
+
+\begin{itemize}
+  \item 理解 JPEG XS 码率控制的基本原理：前向预算分配
+  \item 掌握 CBR（恒定码率）预算计算
+  \item 理解预算表（budget table）的结构和填充方式
+  \item 掌握量化/细化搜索算法：\texttt{\_do\_rate\_allocation()}
+\end{itemize}
+
+\section{背景与标准语义}
+
+JPEG XS 的码率控制采用\textbf{前向分配}（forward allocation）模式，与 JPEG 2000 的后向 RD 优化（PCRD-opt）截然不同。
+
+整个码率控制管线包含三个相对独立的步骤：
+
+\begin{enumerate}
+  \item \textbf{CBR 预算分配}：根据总码率预算和已编码行数，计算当前 precinct 能使用的 bit 数。
+  \item \textbf{Q/R 搜索}：通过搜索量化参数 $Q$ 和细化参数 $R$，使 precinct 的编码量恰好不超过预算。如果即使将所有 band 清空（GTLI 达到最大值）仍无法满足预算，搜索失败并报错。
+  \item \textbf{GCLI 方法选择与 raw fallback}：在计算每种 GCLI 方法的预算时，\texttt{detect\_gcli\_raw\_fallback()} 对每个 subpacket 比较``正常 GCLI 编码（预测残差 + sigflag + unary）''和``raw GCLI 编码（直接写 4-bit GCLI 值，无预测，无 sigflag）''的编码量。如果 raw 更省 bit，则将该 subpacket 的 GCLI 编码方式替换为 raw。这是一个 subpacket 层面的编码成本比较与替换，不是 Q/R 搜索失败后的兜底机制。
+\end{enumerate}
+
+这种前向分配的优势是\textbf{延迟极低}——不需要缓存整帧后再做优化。
+
+\section{数学定义}
+
+\subsection{CBR 预算计算}
+
+给定总预算（以 nibble 为单位，即 $\mathit{image\_rate\_bytes} \times 2$），已消耗行数 $L_{\mathit{consumed}}$，当前 precinct 覆盖的像素行数 $L_{\mathit{prec}}$，图像总行数 $H$：
+\begin{equation}\label{eq:cbr-budget}
+B_{\mathit{cbr}} = \left\lfloor \frac{B_{\mathit{total}} \times (L_{\mathit{consumed}} + L_{\mathit{prec}})}{H} \right\rfloor_{\text{nibble-aligned}}
+\end{equation}
+其中 $\lfloor\cdot\rfloor_{\text{nibble-aligned}}$ 表示结果强制对齐到偶数（\texttt{\& \~{}0x1}），确保 nibble 对齐。
+
+在代码中（\texttt{budget\_getcbr()}，\texttt{budget.c:140}）：
+
+\begin{lstlisting}[language=C,caption={CBR 预算计算——\texttt{budget\_getcbr()}}]
+uint32_t budget_getcbr(uint32_t total_budget, uint32_t n_lines, uint32_t total_lines)
+{
+    uint64_t bigint = total_budget;
+    bigint *= n_lines;
+    bigint /= total_lines;
+    return (uint32_t)(bigint & ~0x1);  // 确保偶数（nibble 对齐）
+}
+\end{lstlisting}
+
+实际使用的是 \textbf{nibble}（4 bit）为单位：\texttt{nibbles\_image = image\_rate\_bytes * 2}。
+
+\textbf{单位系统}：JPEG XS 的码率控制涉及三种单位，转换关系：
+
+\begin{table}[H]
+\centering
+\caption{码率控制单位系统}
+\label{tab:rc-units}
+\begin{tabular}{@{}lll@{}}
+\toprule
+单位 & 换算 & 使用位置 \\
+\midrule
+\textbf{byte}（8 bit） & = 2 nibbles = 8 bits & 配置参数（\texttt{bitstream\_size\_in\_bytes}） \\
+\textbf{nibble}（4 bit） & = 0.5 byte = 4 bits & CBR 预算、消耗量追踪 \\
+\textbf{bit} & = 0.25 nibble = 1/8 byte & precinct 预算、PBT、编码量计算 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+转换代码：
+\begin{lstlisting}[language=C,numbers=none]
+nibbles_image = image_rate_bytes * 2;        // byte → nibble
+budget_bits = (budget_cbr - consumed) << 2;  // nibble → bit
+nibbles_consumed += (precinct_bits >> 2);    // bit → nibble
+\end{lstlisting}
+
+\begin{engineeringnote}
+nibble 单位在标准文本中未显式定义，而是通过代码中的 \texttt{* 2}、\texttt{<< 2}、\texttt{>> 2} 等转换操作体现。nibble 是 byte 和 bit 之间的自然折衷——比 byte 精细（支持 4-bit 对齐），比 bit 简洁（数值更小，避免溢出）。
+
+CBR 返回值通过 \texttt{\& \~{}0x1} 强制偶数对齐（nibble 对齐）。
+\end{engineeringnote}
+
+\subsection{Precinct 预算}
+
+\begin{equation}\label{eq:prec-budget}
+B_{\mathit{prec}} = (B_{\mathit{cbr}} - B_{\mathit{consumed}}) \times 4
+\end{equation}
+
+在代码中（\texttt{rate\_control\_process\_precinct()}，\texttt{rate\_control.c:160}）：
+
+\begin{lstlisting}[language=C,numbers=none]
+ra_params.budget = ((budget_cbr - nibbles_consumed) << 2);
+\end{lstlisting}
+
+左移 2 位等价于乘以 4，将 nibble 转换为 bit。
+
+\subsection{预算表（Budget Table）}
+
+\texttt{precinct\_budget\_table\_t}（\texttt{precinct\_budget\_table.h}）是一个二维预算矩阵：
+
+\begin{itemize}
+  \item \textbf{第一维}：position（每个 band 行一个 entry）
+  \item \textbf{第二维}：gtli（0 到 \texttt{MAX\_GCLI=15}，表示不同量化级别下的编码量）
+\end{itemize}
+
+每个 cell 记录 4 个预算项：
+\begin{itemize}
+  \item \texttt{pbt[position][gtli].sigf} --- 显著性标志 bit 数
+  \item \texttt{pbt[position][gtli].gcli} --- GCLI 编码 bit 数
+  \item \texttt{pbt[position][gtli].data} --- 数据 bitplane bit 数
+  \item \texttt{pbt[position][gtli].sign} --- 符号 bit 数（仅 $F_s=1$ 时非零）
+\end{itemize}
+
+预算表由两个函数填充：
+\begin{enumerate}
+  \item \texttt{fill\_gcli\_budget\_table()}（\texttt{gcli\_budget.c:226}）：计算 sigf + gcli 预算
+  \item \texttt{fill\_data\_budget\_table()}（\texttt{data\_budget.c:118}）：计算 data + sign 预算
+\end{enumerate}
+
+\subsection{Precinct 预算信息}
+
+\texttt{precinct\_budget\_info\_t}（\texttt{precinct\_budget.h}）是\textbf{最终的 precinct 编码量汇总}，由 \texttt{precinct\_get\_budget()}（\texttt{precinct\_budget.c:164}）从二维 PBT 中提取。
+
+\subsection{GTLI 表计算}
+
+给定量化参数 $Q$、细化参数 $R$、band 数 $N_l$、增益 \texttt{lvl\_gains[]} 和优先级 \texttt{lvl\_priorities[]}：
+
+\begin{lstlisting}[language=C,numbers=none]
+for lvl = 0 to N_l - 1:
+    gtli_data[lvl] = compute_gtli(Q, lvl_gains[lvl], lvl_priorities[lvl] < R)
+    gtli_gcli[lvl] = gtli_data[lvl]
+\end{lstlisting}
+
+其中 \texttt{compute\_gtli()}（\texttt{sb\_weighting.c:58}）：
+\begin{equation}\label{eq:gtli}
+\mathit{GTLI} = \mathrm{clip}(Q - \mathit{gain} - \mathit{add\_1bp},\; 0,\; 15)
+\end{equation}
+
+$\mathit{add\_1bp} = (\mathit{priority} < R)$ 为真时额外截断一个 bitplane。
+
+含义：
+\begin{itemize}
+  \item $Q$ 是全局量化强度（越大 = 越粗糙）
+  \item $\mathit{gain}$ 是该 band 的增益（重要 band 的 gain 大，被保护）
+  \item $R$ 是细化参数（$R$ 越大，低优先级 band 被额外截断越多）
+\end{itemize}
+
+\subsection{GCLI 编码方式选择与 raw fallback}
+
+在 Q/R 搜索的每一次预算计算中，\texttt{precinct\_get\_budget()} 做了两件事：
+
+\textbf{第一步 — 选择最优 GCLI 方法}：\texttt{precinct\_get\_best\_gcli\_method()} 对每个 band，遍历所有启用的 GCLI 编码方法，选择使 sigf + gcli 编码量最小的方法。排除 raw 编码（因为 raw 没有 sigflag 和预测，放在第二步单独比较）。
+
+\textbf{第二步 — raw fallback 比较}：\texttt{detect\_gcli\_raw\_fallback()} 对每个 subpacket，将已选方法的编码量（sigf + gcli）与 raw 编码的编码量（直接写 4-bit GCLI 值，无预测，无 sigflag，对齐后完全填满 subpacket 的 GCLI 段）做比较：
+
+\begin{itemize}
+  \item 如果 $\mathit{size\_raw} \leq \mathit{size\_sigf} + \mathit{size\_gcli}$：用 raw 替换该 subpacket 的 GCLI 编码（sigf 段清零，GCLI 段用 raw 长度）。
+  \item 如果 $\mathit{size\_raw} > \mathit{size\_sigf} + \mathit{size\_gcli}$：保持原方法不变。
+\end{itemize}
+
+比较有两种模式，由 $R_l$ 参数控制：
+\begin{itemize}
+  \item $R_l = 0$（默认）：\textbf{per-band 比较}。对每个 band 单独判断——该 band 的所有行共享同一个 subpacket，只有该 band 在所有行的总 raw 成本 $\leq$ 总正常成本时才替换。
+  \item $R_l = 1$：\textbf{per-packet 比较}。对每个 subpacket 单独判断，粒度更粗。
+\end{itemize}
+
+\begin{engineeringnote}
+raw fallback 不是``Q/R 搜索失败后的备选方案''。它在每次 Q/R 搜索迭代的预算计算中都会被调用——它是正常预算计算流程的一部分。Q/R 搜索如果失败（所有 band 已清空仍超预算），会返回 $-1$ 并报错，不会``回退到 raw fallback''继续编码。二者的关系是：raw fallback 降低了每次搜索迭代中计算出的 precinct 预算，使得搜索更有可能找到可行的 $(Q, R)$ 组合；但它本身不是搜索失败后的兜底机制。
+\end{engineeringnote}
+
+\section{处理流程：码率搜索算法}
+
+\texttt{\_do\_rate\_allocation()}（\texttt{rate\_control.c:242}）实现了两阶段搜索。
+
+\subsection{两阶段搜索}
+
+\begin{lstlisting}[language=C,numbers=none]
+_do_rate_allocation(precinct, ra_params, pbt, ...):
+    // 阶段 1: 增加 Q 直到满足预算
+    Q = 0, R = 0
+    loop:
+        compute_gtli_tables(Q, R, ...) → total_budget
+        if total_budget == target: return  // 恰好匹配
+        if total_budget < target:  break   // 预算够了
+        if !empty:               Q += 1   // 还太贵
+        else:                    return ERROR  // 清空了也不够
+
+    // 阶段 2: 增加 R 直到超预算
+    loop:
+        compute_gtli_tables(Q, R, ...) → total_budget
+        if total_budget > target:
+            R -= 1                       // 回退一步
+            recompute → return           // 用回退后的结果
+        if R == max_refinement: return   // 已到最大
+        R += 1                           // 还有余量，增加细化
+\end{lstlisting}
+
+\textbf{算法思想}：
+\begin{itemize}
+  \item \textbf{阶段 1（粗调）}：$Q$ 控制所有 band 的截断强度。每增加 $Q$，所有 band 的 GTLI 加 1，编码量大幅下降。
+  \item \textbf{阶段 2（细调）}：$R$ 控制优先级截断。每增加 $R$，$\mathit{priority} < R$ 的 band 额外截断 1 bitplane，逐步恢复高优先级 band 的精度。
+\end{itemize}
+
+\subsection{源码摘录：\texttt{\_do\_rate\_allocation()}}
+
+\begin{lstlisting}[language=C,caption={Q/R 两阶段搜索——\texttt{\_do\_rate\_allocation()}}]
+int _do_rate_allocation(precinct_t* precinct, ra_params_t* ra_params,
+    precinct_budget_table_t* pbt,
+    int* quantization_out, int* refinement_out,
+    int* gtli_table_data, int* gtli_table_gcli,
+    int* gcli_sb_methods, precinct_budget_info_t* bgt_info)
+{
+    int total_budget = 0;
+    const uint8_t* lvl_gains = ra_params->lvl_gains;
+    const uint8_t* lvl_priorities = ra_params->lvl_priorities;
+    const int max_refinement = bands_count_of(precinct) - 1;
+    int empty;
+
+    *quantization_out = 0;                                    // (1) Q 从 0 开始
+    *refinement_out = 0;                                      // R 从 0 开始
+
+    // ===== 阶段 1：增加 Q 直到满足预算 =====
+    while (true)
+    {
+        compute_gtli_tables(*quantization_out, *refinement_out,
+            bands_count_of(precinct), lvl_gains, lvl_priorities,
+            gtli_table_data, gtli_table_gcli, &empty);         // (2) 计算 GTLI 表
+        total_budget = ra_helper_get_total_budget_(            // (3) 计算编码量
+            precinct, ra_params, pbt, gtli_table_data,
+            gtli_table_gcli, gcli_sb_methods, bgt_info);
+
+        if (total_budget == ra_params->budget)                 // (4) 恰好匹配
+            return total_budget;
+        else if (total_budget < ra_params->budget)             // (5) 预算够了
+            break;
+        else if (!empty)                                       // (6) 还太贵，Q++
+            ++*quantization_out;
+        else                                                   // (7) 清空了也不够
+            return -1;  // ERROR
+    }
+
+    // ===== 阶段 2：增加 R 直到超预算 =====
+    while (true)
+    {
+        compute_gtli_tables(*quantization_out, *refinement_out, ...);
+        total_budget = ra_helper_get_total_budget_(...);
+
+        if (total_budget > ra_params->budget)                  // (8) 超预算
+        {
+            --*refinement_out;                                 // 回退一步
+            compute_gtli_tables(...);                          // 重新计算
+            total_budget = ra_helper_get_total_budget_(...);
+            return total_budget;                               // (9) 返回结果
+        }
+        else if (*refinement_out == max_refinement)            // (10) 已到最大
+            return total_budget;
+        else
+            ++*refinement_out;                                 // (11) 还有余量，R++
+    }
+}
+\end{lstlisting}
+
+\subsection{单位转换关键行}
+
+\begin{itemize}
+  \item \texttt{budget\_getcbr()} 返回 \textbf{nibble} 为单位的累积预算
+  \item \texttt{((budget\_cbr - nibbles\_consumed) << 2)} 将 nibble 转换为 \textbf{bit}（$\times 4$）
+  \item \texttt{(precinct\_bits >> 2)} 将 bit 转换回 \textbf{nibble}（$\div 4$）
+  \item \texttt{nibbles\_image = image\_rate\_bytes * 2} 将 byte 转换为 \textbf{nibble}（$\times 2$）
+\end{itemize}
+
+\subsection{流程图}
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[
+    node distance=0.75cm and 0.8cm,
+    block/.style={rectangle, draw=structurecolor!60, fill=structurecolor!10,
+                  text width=3.8cm, align=center, minimum height=0.8cm, font=\small, inner sep=4pt},
+    decision/.style={diamond, draw=second!70, fill=second!12,
+                     text width=2cm, align=center, aspect=1.8, font=\small, inner sep=2pt},
+    arrow/.style={-{Stealth[length=2.5mm]}, thick, draw=structurecolor!60}
+]
+    \node[block] (cbr) {CBR 预算\\\texttt{budget\_getcbr}};
+    \node[block, below=of cbr] (prec) {precinct 预算 bit 数};
+    \node[block, below=of prec] (gcli) {\texttt{fill\_gcli\_budget\_table}};
+    \node[block, below=of gcli] (data) {\texttt{fill\_data\_budget\_table}};
+    \node[block, below=of data] (init) {$Q{=}0,\;R{=}0$};
+    \node[block, below=of init] (gtli) {\texttt{compute\_gtli\_tables}};
+    \node[block, below=of gtli] (budget) {\texttt{precinct\_get\_budget}};
+    \node[decision, below=of budget] (check) {total $\leq$ target?};
+    \node[block, left=2.2cm of check] (qinc) {$Q{++}$};
+    \node[decision, below=of check] (phase2) {Phase 2};
+    \node[block, left=2.2cm of phase2] (rinc) {$R{++}$ 直到超预算};
+    \node[block, below=of phase2] (result) {回退 $R{-}1$, 返回结果};
+    \node[block, right=2.2cm of phase2] (error) {报错};
+
+    \draw[arrow] (cbr) -- (prec);
+    \draw[arrow] (prec) -- (gcli);
+    \draw[arrow] (gcli) -- (data);
+    \draw[arrow] (data) -- (init);
+    \draw[arrow] (init) -- (gtli);
+    \draw[arrow] (gtli) -- (budget);
+    \draw[arrow] (budget) -- (check);
+    \draw[arrow] (check) -- node[above,font=\small,pos=0.6] {否, 非empty} (qinc);
+    \draw[arrow] (qinc) |- (gtli);
+    \draw[arrow] (check) -- node[right,font=\small,pos=0.4] {是} (phase2);
+    \draw[arrow] (phase2) -- node[above,font=\small,pos=0.6] {否, empty} (error);
+    \draw[arrow] (phase2) -- (rinc);
+    \draw[arrow] (rinc) |- (budget);
+    \draw[arrow] (phase2) -- (result);
+\end{tikzpicture}
+\caption{Q/R 两阶段搜索流程图}
+\label{fig:rc-flowchart}
+\end{figure}
+
+\section{实现映射}
+
+\begin{implmap}
+\begin{tabular}{@{}L{2.5cm}L{3.8cm}L{5.3cm}L{3.8cm}@{}}
+\toprule
+标准概念 & 入口文件 & 关键函数/结构 & 说明 \\
+\midrule
+码率控制总入口 & \btt{rate\_control.c:160} & \btt{rate\_control\_process\_precinct()} & 处理一个 precinct \\
+Q/R 搜索 & \btt{rate\_control.c:242} & \btt{\_do\_rate\_allocation()} & 两阶段搜索，失败返回 $-1$ \\
+CBR 预算 & \btt{budget.c:140} & \btt{budget\_getcbr()} & Eq~\eqref{eq:cbr-budget} \\
+GTLI 计算 & \btt{sb\_weighting.c:68} & \btt{compute\_gtli\_tables()} & Eq~\eqref{eq:gtli} \\
+GCLI 方法选择 & \btt{precinct\_budget.c:64} & \btt{precinct\_get\_best\_gcli\_method()} & 每个 band 选最优方法 \\
+Raw fallback & \btt{precinct\_budget.c:112} & \btt{detect\_gcli\_raw\_fallback()} & subpacket 层面比较 raw vs 正常编码 \\
+预算表 & \btt{precinct\_budget\_table.c} & \btt{pbt\_open()}, \btt{fill\_*\_budget\_table()} & 预算存储 \\
+预算初始化 & \btt{rate\_control.c:133} & \btt{rate\_control\_init()} & 设置总预算 \\
+\bottomrule
+\end{tabular}
+\end{implmap}
+
+\begin{codefact}
+本章关键结论依据以下函数：
+\begin{itemize}
+  \item \texttt{rate\_control\_process\_precinct()} --- \texttt{rate\_control.c:160} --- 码率控制总入口
+  \item \texttt{\_do\_rate\_allocation()} --- \texttt{rate\_control.c:242} --- Q/R 两阶段搜索
+  \item \texttt{budget\_getcbr()} --- \texttt{budget.c:140} --- CBR 预算计算（nibble 对齐）
+  \item \texttt{compute\_gtli\_tables()} --- \texttt{sb\_weighting.c:68} --- GTLI 表计算 + empty 检测
+  \item \texttt{precinct\_get\_budget()} --- \texttt{precinct\_budget.c:164} --- precinct 预算组装
+\end{itemize}
+\end{codefact}
+
+\section{常见误解}
+
+\begin{misunderstanding}
+\begin{enumerate}
+  \item \textbf{``码率控制会精确匹配目标码率''} --- 不一定。算法尝试匹配，但如果预算不足（所有 band 已清空仍超预算），\texttt{\_do\_rate\_allocation()} 返回 $-1$ 并报错，不会自动回退到 raw fallback。码流末尾的 padding 用于对齐，不是码率控制失败后的补救。
+  \item \textbf{``$Q$ 和 $R$ 的作用相同''} --- 不同。$Q$ 对所有 band 同时作用（粗调），$R$ 按 band 优先级逐步截断（细调）。先用 $Q$ 找到预算内的最大值，再用 $R$ 在剩余空间内恢复精度。
+  \item \textbf{``预算表只包含数据部分''} --- 预算表包含 4 个部分：significance flags、GCLI、data、sign。每个部分的 bit 数独立计算。
+\end{enumerate}
+\end{misunderstanding}
+
+\section{本章小结}
+
+JPEG XS 的码率控制通过 CBR 预算分配和 Q/R 两阶段搜索实现前向码率控制。预算表记录了每个 subpacket 的详细编码量，Q/R 搜索在带宽约束下找到最优的量化/细化组合。这种前向设计保证了极低的编码延迟。
+
+下一章将深入量化和 GTLI 选择的细节，以及 dead-zone 和 uniform 两种量化器的区别。

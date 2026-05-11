@@ -1,0 +1,63 @@
+% packing-and-marker-examples.tex — 打包与 Marker 算例
+% Source: examples/packing-and-marker-examples.md
+
+\section{打包与 Marker 算例}\label{sec:packing-examples}
+
+对应章节：\cref{ch:packing}
+
+\subsection{算例 1：单组系数的 data packing}
+
+\begin{examplebox}[title={Packing Worked Example：单组系数的 data packing}]
+
+\textbf{输入}：1 个 band 行，$N_g = 4$，$F_s = 0$（jointly），$\mathit{GTLI} = 2$。
+
+4 个 sign-magnitude 系数（已左移回原始 bitplane 位置）：
+
+\begin{tabular}{@{}rrrrl@{}}
+\toprule
+索引 & 系数值 & 符号 & 幅度 & 二进制 \\
+\midrule
+0 & 0x0000001C & $+$ & 28 & 0b00011100 \\
+1 & 0x00000005 & $+$ & 5  & 0b00000101 \\
+2 & 0x8000000A & $-$ & 10 & 0b00001010 \\
+3 & 0x00000000 & $+$ & 0  & 0b00000000 \\
+\bottomrule
+\end{tabular}
+
+$\mathit{GCLI} = \mathrm{BSR}(28\,|\,5\,|\,10\,|\,0) + 1 = \mathrm{BSR}(31) + 1 = 4 + 1 = 5$。
+
+\texttt{pack\_data()} 执行：
+
+\textbf{Step 1：写符号位}（$F_s=0$，每个 bitplane 前写 4 个符号 bit）：
+\begin{lstlisting}[numbers=none]
+sign bits: 0, 0, 1, 0  （系数 0 正, 1 正, 2 负, 3 正）
+\end{lstlisting}
+
+\textbf{Step 2：bitplane 4（MSB）}——从 $\mathit{gcli}-1 = 4$ 开始：
+\begin{lstlisting}[numbers=none]
+bp=4: buf[0]>>4 = 0, buf[1]>>4 = 0, buf[2]>>4 = 0, buf[3]>>4 = 0
+写入: 0 0 0 0
+\end{lstlisting}
+
+\textbf{Step 3：bitplane 3}：
+\begin{lstlisting}[numbers=none]
+bp=3: buf[0]>>3 = 1, buf[1]>>3 = 0, buf[2]>>3 = 1, buf[3]>>3 = 0
+写入: 1 0 1 0
+\end{lstlisting}
+
+\textbf{Step 4：bitplane 2}（$\mathit{GTLI} = 2$，这是最后一个写入的 bitplane）：
+\begin{lstlisting}[numbers=none]
+bp=2: buf[0]>>2 = 1, buf[1]>>2 = 1, buf[2]>>2 = 0, buf[3]>>2 = 0
+写入: 1 1 0 0
+\end{lstlisting}
+
+\textbf{完整 bit 流}（1 组）：
+\begin{lstlisting}[numbers=none]
+符号: 0 0 1 0  |  bp=4: 0 0 0 0  |  bp=3: 1 0 1 0  |  bp=2: 1 1 0 0
+\end{lstlisting}
+
+总计：$4 \text{ (sign)} + 4 \times 3 \text{ (data)} = \mathbf{16 \text{ bit}} = 2 \text{ bytes}$。
+
+验证：$(\mathit{GCLI} - \mathit{GTLI} + 1) \times \mathit{group\_size} = (5 - 2 + 1) \times 4 = 16 \text{ bit}$ \checkmark
+
+\end{examplebox}
