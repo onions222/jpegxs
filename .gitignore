@@ -22,6 +22,15 @@ cmake-build-*/
 *.fls
 *.fdb_latexmk
 *.synctex.gz
+*.bcf
+*.run.xml
+*.bbl
+*.blg
+*.xdv
+
+# LaTeX editor temp
+docs/jpegxs-textbook-latex/.texpadtmp/
+docs/jpegxs-textbook-latex/main.pdf
 
 # Generated binaries / archives
 *.o
