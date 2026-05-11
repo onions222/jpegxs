@@ -44,6 +44,7 @@ docs/jpegxs-textbook-latex/main.pdf
 # Data and image assets
 data/
 samples/
+learning/
 
 # Local verification artifacts
 tmp/
